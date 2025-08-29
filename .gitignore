@@ -1,0 +1,27 @@
+# Telegram session files
+*.session
+*.session-journal
+
+# Config with sensitive data
+config.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+
+# Backup directories
+sessions_backup/
+sessions_blocked/
+sessions_inactive/
+sessions_old*/
+
+# Target files (may contain sensitive usernames)
+target_*_only.txt
+
+# Temporary files
+*.tmp
+*.temp
