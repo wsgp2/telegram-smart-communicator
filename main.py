@@ -7,6 +7,9 @@ from telethon.tl.functions.contacts import GetContactsRequest
 from telethon.errors import FloodWaitError, PeerFloodError
 import telethon
 
+# 🤖 Импортируем бот для уведомлений
+from notification_bot import init_notification_bot, notify_admin_via_bot, notification_bot
+
 CONFIG_FILE = "config.json"
 SESSION_FOLDER = "sessions"
 USERS_FILE = "target_users.txt"
@@ -137,12 +140,15 @@ def create_proxy_tuple(proxy_info, proxy_type):
 
 # ---------- Отправка админу ----------
 async def notify_admin(sender, text, client, admin_username):
+    """УСТАРЕВШАЯ ФУНКЦИЯ - оставлена для совместимости"""
     if not admin_username:
         return
     try:
         await client.send_message(admin_username, f"📩 Сообщение от {sender.first_name}: {text}")
     except Exception as e:
         print(f"[!] Ошибка отправки админу: {e}")
+
+# 🤖 НОВАЯ СИСТЕМА УВЕДОМЛЕНИЙ ЧЕРЕЗ БОТА
 
 
 # ---------- Загрузка сессий ----------
@@ -236,7 +242,9 @@ async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_
             if hasattr(event.client, 'sent_users') and sender.id in event.client.sent_users:
                 text = event.raw_text
                 print(f"\n📩 [{sender.first_name}] -> {text}")
-                await notify_admin(sender, text, event.client, admin_username)
+                
+                # 🤖 НОВОЕ: Уведомление через бота в группу
+                await notify_admin_via_bot(sender, text, event.client)
 
     for client in sessions:
         me = await client.get_me()
@@ -300,6 +308,13 @@ async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_
 # ---------- MAIN ----------
 async def main():
     cfg = load_config()
+    
+    # 🤖 Инициализируем бот для уведомлений
+    init_notification_bot()
+    
+    # 🧪 Тестируем бот
+    if notification_bot:
+        await notification_bot.test_connection()
 
     while True:
         print("\n=== Telegram Mass Sender (Console) ===")
