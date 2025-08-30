@@ -8,7 +8,7 @@ from telethon.errors import FloodWaitError, PeerFloodError
 import telethon
 
 # 🤖 Импортируем бот для уведомлений
-from notification_bot import init_notification_bot, notification_bot
+import notification_bot as nb
 
 # 🗂️ Импортируем чат-менеджер
 from chat_manager import ChatManager
@@ -230,7 +230,7 @@ def is_telegram_service_message(event, sender):
 # 🚨 УВЕДОМЛЕНИЯ О СЛУЖЕБНЫХ СООБЩЕНИЯХ
 async def notify_telegram_service(sender, text, receiving_client):
     """Отправка критических уведомлений о безопасности"""
-    if not notification_bot:
+    if not nb.notification_bot:
         return
         
     try:
@@ -264,7 +264,7 @@ async def notify_telegram_service(sender, text, receiving_client):
         }
         
         # Отправляем КРИТИЧЕСКОЕ уведомление
-        await notification_bot.send_security_notification(
+        await nb.notification_bot.send_security_notification(
             account_info, sender_info, text, message_type
         )
         
@@ -381,7 +381,7 @@ async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_
                 print(f"\n📩 [{sender.first_name}] -> {text}")
                 
                 # Отправляем уведомление через бота
-                if notification_bot:
+                if nb.notification_bot:
                     try:
                         me = await event.client.get_me()
                         account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
@@ -389,7 +389,7 @@ async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_
                             'name': sender.first_name or 'Unknown',
                             'username': sender.username
                         }
-                        await notification_bot.send_notification(account_info, sender_info, text)
+                        await nb.notification_bot.send_notification(account_info, sender_info, text)
                     except Exception as e:
                         print(f"❌ Ошибка отправки уведомления: {e}")
                 
@@ -475,11 +475,11 @@ async def main():
     cfg = load_config()
     
     # 🤖 Инициализируем бот для уведомлений
-    init_notification_bot()
+    nb.init_notification_bot()
     
     # 🧪 Тестируем бот
-    if notification_bot:
-        await notification_bot.test_connection()
+    if nb.notification_bot:
+        await nb.notification_bot.test_connection()
 
     while True:
         print("\n=== Telegram Mass Sender (Console) ===")
@@ -578,7 +578,7 @@ async def main():
                         # Проверяем - это служебное сообщение Telegram?
                         if is_telegram_service_message(event, sender):
                             print(f"\n🚨 [SECURITY] Служебное уведомление: {event.message.text[:100]}...")
-                            if notification_bot:
+                            if nb.notification_bot:
                                 try:
                                     # Формируем данные для служебного уведомления
                                     me = await event.client.get_me()
@@ -587,7 +587,7 @@ async def main():
                                         'name': sender.first_name or 'Telegram',
                                         'username': sender.username or 'telegram'
                                     }
-                                    await notification_bot.send_security_notification(account_info, sender_info, event.message.text)
+                                    await nb.notification_bot.send_security_notification(account_info, sender_info, event.message.text)
                                 except Exception as e:
                                     print(f"❌ Ошибка отправки security уведомления: {e}")
                             return
@@ -596,7 +596,7 @@ async def main():
                         if sender and hasattr(event.client, 'sent_users') and sender.id in event.client.sent_users:
                             print(f"\n👂 [{sender.first_name if sender.first_name else 'Unknown'}] -> {event.message.text}")
 
-                            if notification_bot:
+                            if nb.notification_bot:
                                 try:
                                     # Формируем данные для бота как требуется в notification_bot.py
                                     me = await event.client.get_me()
@@ -605,7 +605,7 @@ async def main():
                                         'name': sender.first_name or 'Unknown',
                                         'username': sender.username
                                     }
-                                    await notification_bot.send_notification(account_info, sender_info, event.message.text)
+                                    await nb.notification_bot.send_notification(account_info, sender_info, event.message.text)
                                 except Exception as e:
                                     print(f"❌ Ошибка отправки уведомления: {e}")
 
