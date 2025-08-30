@@ -609,9 +609,12 @@ async def main():
                                 except Exception as e:
                                     print(f"❌ Ошибка отправки уведомления: {e}")
 
-                            # 🗑️ Автоматически удаляем входящее сообщение только у нас (как в режиме 3)
+                            # 🗂️ Автоматически управляем чатом (как в режиме 3)
                             if hasattr(event.client, 'chat_manager'):
+                                # 🗑️ Удаляем входящее сообщение только у нас
                                 asyncio.create_task(event.client.chat_manager.delete_incoming_message(event.message))
+                                # 🔇📂 Скрываем чат (мьют + архив) 
+                                asyncio.create_task(event.client.chat_manager.hide_chat(sender))
 
                     except Exception as e:
                         print(f"[-] Ошибка в обработчике: {e}")
