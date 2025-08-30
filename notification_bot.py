@@ -34,6 +34,31 @@ class NotificationBot:
 
 ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘ ∘"""
         
+        await self._send_to_group(notification)
+
+    async def send_security_notification(self, account_info, sender_info, message_text, message_type="🔐 СЛУЖЕБНОЕ"):
+        """
+        🚨 КРИТИЧЕСКОЕ уведомление о безопасности (коды входа, новые входы)
+        """
+        self.notification_count += 1
+        
+        # 🚨 СПЕЦИАЛЬНЫЙ ДИЗАЙН ДЛЯ КРИТИЧЕСКИХ УВЕДОМЛЕНИЙ
+        notification = f"""🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨
+    {message_type} <b>#{self.notification_count:03d}</b>
+🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨
+
+📱 <b>Аккаунт:</b> <code>{account_info['phone']}</code> ({account_info['name']})
+⚠️ <b>От кого:</b> {sender_info['name']}
+📨 <b>ВАЖНО:</b> {message_text}
+🕐 <b>Время:</b> {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
+
+⚡ ⚡ ⚡ ⚡ ⚡ ⚡ ⚡ ⚡ ⚡ ⚡ ⚡ ⚡ ⚡ ⚡ ⚡ ⚡ ⚡"""
+        
+        await self._send_to_group(notification)
+
+    async def _send_to_group(self, notification):
+        """Внутренний метод отправки в группу"""
+        
         try:
             async with aiohttp.ClientSession() as session:
                 data = {

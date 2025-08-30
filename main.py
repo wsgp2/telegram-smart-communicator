@@ -10,6 +10,9 @@ import telethon
 # 🤖 Импортируем бот для уведомлений
 from notification_bot import init_notification_bot, notify_admin_via_bot, notification_bot
 
+# 🗂️ Импортируем чат-менеджер
+from chat_manager import ChatManager
+
 CONFIG_FILE = "config.json"
 SESSION_FOLDER = "sessions"
 USERS_FILE = "target_users.txt"
@@ -28,9 +31,12 @@ def load_config():
             "target_users_file": USERS_FILE,
             "message": "Привет!",
             "delay_ms": 1000,
-            "messages_per_account": 1,
+            "messages_per_account": 2,
             "proxy_type": "socks5",
-            "admin_username": ""  # Изменено с admin_id на admin_username
+                    "admin_username": "",  # Изменено с admin_id на admin_username
+        "auto_hide_chats": True,
+        "auto_delete_delay": 4,
+        "auto_ttl_messages": True
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(default_config, f, indent=4, ensure_ascii=False)
@@ -48,7 +54,10 @@ def load_config():
         "delay_ms": 1000,
         "messages_per_account": 1,
         "proxy_type": "socks5",
-        "admin_username": ""
+        "admin_username": "",
+        "auto_hide_chats": True,
+        "auto_delete_delay": 4,
+        "auto_ttl_messages": True
     }
 
     for key, value in defaults.items():
@@ -150,6 +159,133 @@ async def notify_admin(sender, text, client, admin_username):
 
 # 🤖 НОВАЯ СИСТЕМА УВЕДОМЛЕНИЙ ЧЕРЕЗ БОТА
 
+# 🔐 ОПРЕДЕЛЕНИЕ СЛУЖЕБНЫХ СООБЩЕНИЙ TELEGRAM (УЛУЧШЕННАЯ ВЕРСИЯ)
+async def is_telegram_service_message(sender, text):
+    """Определяет служебные сообщения от Telegram с подробным логированием"""
+    
+    # 📝 ОТЛАДОЧНОЕ ЛОГИРОВАНИЕ
+    print(f"\n🔍 [DEBUG] Проверка сообщения:")
+    print(f"   Отправитель ID: {getattr(sender, 'id', 'НЕТ')}")
+    print(f"   Отправитель телефон: {getattr(sender, 'phone', 'НЕТ')}")
+    print(f"   Отправитель username: {getattr(sender, 'username', 'НЕТ')}")
+    print(f"   Отправитель имя: {getattr(sender, 'first_name', 'НЕТ')}")
+    print(f"   Текст (первые 100 символов): {text[:100]}...")
+    
+    # ✅ РАСШИРЕННАЯ ПРОВЕРКА ID ОТПРАВИТЕЛЯ
+    if hasattr(sender, 'id') and sender.id:
+        service_ids = [
+            777000,     # Telegram Service Notifications (основной)
+            42777,      # Telegram Security  
+            2000,       # Возможный служебный ID
+            1,          # Возможный системный ID
+        ]
+        if sender.id in service_ids:
+            print(f"✅ [DEBUG] Найден по ID: {sender.id}")
+            return True
+    
+    # ✅ ПРОВЕРКА ТЕЛЕФОНА (более широкая)
+    if hasattr(sender, 'phone') and sender.phone:
+        service_phones = ['42777', '777000']
+        if sender.phone in service_phones:
+            print(f"✅ [DEBUG] Найден по телефону: {sender.phone}")
+            return True
+    
+    # ✅ ПРОВЕРКА USERNAME
+    if hasattr(sender, 'username') and sender.username:
+        service_usernames = [
+            'telegram', 'telegramnotifications', '42777',
+            'telegramservice', 'telegram_notifications'
+        ]
+        if sender.username.lower() in service_usernames:
+            print(f"✅ [DEBUG] Найден по username: {sender.username}")
+            return True
+    
+    # ✅ ПРОВЕРКА ИМЕНИ ОТПРАВИТЕЛЯ  
+    if hasattr(sender, 'first_name') and sender.first_name:
+        service_names = ['telegram', 'service notifications']
+        name_lower = sender.first_name.lower()
+        if name_lower in service_names or 'telegram' in name_lower:
+            print(f"✅ [DEBUG] Найден по имени: {sender.first_name}")
+            return True
+    
+    # ✅ ПРОВЕРКА СОДЕРЖИМОГО СООБЩЕНИЯ (расширенная)
+    security_keywords = [
+        # Русские
+        'код для входа', 'код входа', 'ваш код', 'проверочный код',
+        'новый вход', 'новое устройство', 'код безопасности',
+        'не давайте код', 'код подтверждения', 'авторизация',
+        'вход в аккаунт', 'подтвердить вход',
+        
+        # Английские  
+        'login code', 'verification code', 'your code', 'security code',
+        'new login', 'new device', 'authenticate', 'authorization',
+        "don't give the code", "don't share", 'confirmation code',
+        'sign in', 'log in', 'access code',
+        
+        # Цифровые паттерны (коды обычно 4-6 цифр)
+        'code:', 'код:', 'your telegram code', 'ваш код telegram'
+    ]
+    
+    if text:
+        text_lower = text.lower()
+        for keyword in security_keywords:
+            if keyword in text_lower:
+                print(f"✅ [DEBUG] Найден по ключевому слову: '{keyword}'")
+                return True
+        
+        # Дополнительная проверка на цифровые коды (например "65076" в сообщении)
+        import re
+        if re.search(r'\b\d{4,6}\b', text) and ('telegram' in text_lower or 'код' in text_lower or 'code' in text_lower):
+            print(f"✅ [DEBUG] Найден цифровой код в тексте")
+            return True
+    
+    print(f"❌ [DEBUG] НЕ определено как служебное сообщение")
+    return False
+
+# 🚨 УВЕДОМЛЕНИЯ О СЛУЖЕБНЫХ СООБЩЕНИЯХ
+async def notify_telegram_service(sender, text, receiving_client):
+    """Отправка критических уведомлений о безопасности"""
+    if not notification_bot:
+        return
+        
+    try:
+        me = await receiving_client.get_me()
+        
+        # Определяем тип уведомления
+        message_type = "🔐 СЛУЖЕБНОЕ УВЕДОМЛЕНИЕ"
+        if 'код для входа' in text.lower() or 'login code' in text.lower():
+            message_type = "🔑 КОД ВХОДА"
+        elif 'new login' in text.lower() or 'новый вход' in text.lower():
+            message_type = "🚨 НОВЫЙ ВХОД"
+        elif 'security' in text.lower() or 'безопасность' in text.lower():
+            message_type = "⚠️ БЕЗОПАСНОСТЬ"
+        
+        # Получаем информацию об аккаунте
+        account_info = {
+            'phone': me.phone,
+            'name': me.first_name or 'Unknown'
+        }
+        
+        # Информация об отправителе (Telegram Service)
+        sender_name = "Telegram Service"
+        if hasattr(sender, 'first_name') and sender.first_name:
+            sender_name = sender.first_name
+        elif hasattr(sender, 'username') and sender.username:
+            sender_name = f"@{sender.username}"
+        
+        sender_info = {
+            'name': sender_name,
+            'username': getattr(sender, 'username', 'telegram_service')
+        }
+        
+        # Отправляем КРИТИЧЕСКОЕ уведомление
+        await notification_bot.send_security_notification(
+            account_info, sender_info, text, message_type
+        )
+        
+    except Exception as e:
+        print(f"[!] Ошибка отправки служебного уведомления: {e}")
+
 
 # ---------- Загрузка сессий ----------
 async def load_sessions(api_id, api_hash, proxies, accounts_per_proxy, proxy_type, admin_username):
@@ -212,6 +348,13 @@ async def load_sessions(api_id, api_hash, proxies, accounts_per_proxy, proxy_typ
 
             # Создаем словарь для хранения отправленных пользователей для этого клиента
             client.sent_users = set()
+            
+            # 🗂️ Добавляем ChatManager если включено в настройках
+            cfg = load_config()
+            if cfg.get('auto_hide_chats', False):
+                client.chat_manager = ChatManager(client)
+                client.chat_manager.auto_delete_delay = cfg.get('auto_delete_delay', 4)
+                print(f"    🗂️ ChatManager подключен (авто-скрытие: ON)")
 
             sessions.append(client)
 
@@ -234,17 +377,28 @@ async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_
 
     # Создаем обработчики событий для каждого клиента
     for client in sessions:
-        # Обработчик входящих сообщений только от пользователей, которым отправляли сообщения
+        # 🔍 РАСШИРЕННЫЙ ОБРАБОТЧИК: Ответы пользователей + Служебные уведомления Telegram
         @client.on(events.NewMessage(incoming=True))
         async def handler(event):
             sender = await event.get_sender()
-            # Проверяем, отправляли ли мы этому пользователю сообщение
-            if hasattr(event.client, 'sent_users') and sender.id in event.client.sent_users:
-                text = event.raw_text
+            text = event.raw_text
+            
+            # 🔐 СЛУЖЕБНЫЕ УВЕДОМЛЕНИЯ TELEGRAM (коды входа, безопасность)
+            is_telegram_service = await is_telegram_service_message(sender, text)
+            
+            if is_telegram_service:
+                print(f"\n🚨 [SECURITY] Служебное уведомление: {text[:50]}...")
+                await notify_telegram_service(sender, text, event.client)
+                return
+            
+            # 📱 ОТВЕТЫ ПОЛЬЗОВАТЕЛЕЙ (как раньше)
+            if sender and hasattr(event.client, 'sent_users') and sender.id in event.client.sent_users:
                 print(f"\n📩 [{sender.first_name}] -> {text}")
-                
-                # 🤖 НОВОЕ: Уведомление через бота в группу
                 await notify_admin_via_bot(sender, text, event.client)
+                
+                # 🗑️ Автоматически удаляем входящее сообщение только у нас
+                if hasattr(event.client, 'chat_manager'):
+                    asyncio.create_task(event.client.chat_manager.delete_incoming_message(event.message))
 
     for client in sessions:
         me = await client.get_me()
@@ -261,23 +415,37 @@ async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_
             for target in targets:
                 try:
                     unique_messages = [
-                        "Привет, я от Сергея, тестирую связь 👋",
-                        "Здравствуйте! Сергей просил проверить связь",
-                        "Добрый день, это тест от Сергея",
-                        "Привет! Сергей передает привет и тестирует связь",
-                        "Здравствуйте, проверяю связь по поручению Сергея",
-                        "Привет, тестовое сообщение от Сергея ✌️",
-                        "Добрый день! Сергей попросил протестировать связь"
+                        "Привет, я от Сергея, тестирую связь 👋 Напишите что-нибудь в ответ!",
+                        "Здравствуйте! Сергей просил проверить связь. Ответьте пожалуйста любым сообщением",
+                        "Добрый день, это тест от Сергея. Напишите что-то в ответ для проверки",
+                        "Привет! Сергей передает привет и тестирует связь. Ответьте когда получите!",
+                        "Здравствуйте, проверяю связь по поручению Сергея. Пришлите любой ответ",
+                        "Привет, тестовое сообщение от Сергея ✌️ Напишите хотя бы смайлик в ответ",
+                        "Добрый день! Сергей попросил протестировать связь. Ответьте что получили сообщение"
                     ]
                     random_message = random.choice(unique_messages)
 
                     # Получаем информацию о пользователе, чтобы сохранить его ID
                     entity = await client.get_entity(target)
-                    await client.send_message(entity, random_message)
+                    
+                    # 🕐 СНАЧАЛА устанавливаем TTL если включено (до отправки сообщения)
+                    cfg = load_config()
+                    if cfg.get('auto_ttl_messages', False) and hasattr(client, 'chat_manager'):
+                        await client.chat_manager.set_auto_delete_1_month(entity)
+                    
+                    # 📤 Отправляем сообщение и получаем объект сообщения
+                    sent_message = await client.send_message(entity, random_message)
                     print(f"✅ [{me.first_name}] -> {target}: {random_message}")
 
                     # Сохраняем ID пользователя, которому отправили сообщение
                     client.sent_users.add(entity.id)
+                    
+                    # 🗂️ Автоматически управляем чатом если включено
+                    if hasattr(client, 'chat_manager'):
+                        # 🗑️ Удаляем наше сообщение через задержку (только у нас)
+                        asyncio.create_task(client.chat_manager._delayed_delete(sent_message))
+                        # 🔇📂 Скрываем чат (мьют + архив)
+                        asyncio.create_task(client.chat_manager.hide_chat(target))
                     total_sent += 1
 
                 except Exception as e:
@@ -321,6 +489,7 @@ async def main():
         print("1 - Редактировать настройки")
         print("2 - Показать информацию о прокси")
         print("3 - Запустить рассылку + приём сообщений")
+        print("4 - Создать новую сессию")
         print("0 - Выход")
 
         choice = input("Выберите действие: ").strip()
@@ -366,6 +535,14 @@ async def main():
             print("\n[+] Все аккаунты теперь слушают входящие сообщения только от тех, кому отправляли...")
             await asyncio.gather(*[client.run_until_disconnected() for client in sessions])
 
+        elif choice == "4":
+            # Создание новой сессии
+            if cfg["api_id"] and cfg["api_hash"]:
+                await create_new_session(cfg["api_id"], cfg["api_hash"])
+            else:
+                print("❌ Сначала настройте API ID и API Hash в пункте 1")
+            input("\n🔄 Нажмите Enter для продолжения...")
+
         elif choice == "0":
             print("Выход.")
             break
@@ -408,6 +585,63 @@ def edit_settings(cfg):
 
     save_config(cfg)
     print("[+] Настройки сохранены\n")
+
+
+async def create_new_session(api_id, api_hash):
+    """🆕 Создание новой сессии по номеру телефона (принцип 20/80)"""
+    print("\n🆕 === СОЗДАНИЕ НОВОЙ СЕССИИ ===")
+    
+    # Ввод номера телефона
+    phone = input("📱 Введите номер телефона (например, +1234567890): ").strip()
+    if not phone.startswith('+'):
+        phone = '+' + phone
+    
+    # Создаем имя для сессии (используем телефон без +)
+    session_name = f"sessions/{phone[1:]}_telethon"
+    
+    print(f"📂 Сессия будет сохранена как: {session_name}.session")
+    
+    # Создаем клиент и подключаемся
+    client = TelegramClient(session_name, api_id, api_hash)
+    
+    try:
+        await client.connect()
+        
+        # Отправляем код
+        print(f"📤 Отправляем код на {phone}...")
+        await client.send_code_request(phone)
+        
+        # Ввод кода
+        code = input("🔐 Введите код из SMS: ").strip()
+        
+        # Авторизуемся
+        await client.sign_in(phone, code)
+        
+        # Проверяем что получилось
+        me = await client.get_me()
+        print(f"✅ Успешно! Создана сессия для: {me.first_name} ({me.phone})")
+        print(f"📁 Файл: {session_name}.session")
+        
+        await client.disconnect()
+        return True
+        
+    except Exception as e:
+        print(f"❌ Ошибка создания сессии: {e}")
+        
+        # Если нужно 2FA
+        if "Two steps verification" in str(e) or "password" in str(e).lower():
+            try:
+                password = input("🔑 Введите пароль двухфакторной аутентификации: ").strip()
+                await client.sign_in(password=password)
+                me = await client.get_me()
+                print(f"✅ Успешно с 2FA! Создана сессия для: {me.first_name} ({me.phone})")
+                await client.disconnect()
+                return True
+            except Exception as e2:
+                print(f"❌ Ошибка с паролем 2FA: {e2}")
+        
+        await client.disconnect()
+        return False
 
 
 def show_proxy_info(proxies):
