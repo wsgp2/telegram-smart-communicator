@@ -8,7 +8,7 @@ from telethon.errors import FloodWaitError, PeerFloodError
 import telethon
 
 # 🤖 Импортируем бот для уведомлений
-from notification_bot import init_notification_bot, notify_admin_via_bot, notification_bot
+from notification_bot import init_notification_bot, notification_bot
 
 # 🗂️ Импортируем чат-менеджер
 from chat_manager import ChatManager
@@ -160,86 +160,71 @@ async def notify_admin(sender, text, client, admin_username):
 # 🤖 НОВАЯ СИСТЕМА УВЕДОМЛЕНИЙ ЧЕРЕЗ БОТА
 
 # 🔐 ОПРЕДЕЛЕНИЕ СЛУЖЕБНЫХ СООБЩЕНИЙ TELEGRAM (УЛУЧШЕННАЯ ВЕРСИЯ)
-async def is_telegram_service_message(sender, text):
-    """Определяет служебные сообщения от Telegram с подробным логированием"""
+def is_telegram_service_message(event, sender):
+    """Определяет ТОЛЬКО реальные служебные сообщения от Telegram (улучшенная версия)"""
     
-    # 📝 ОТЛАДОЧНОЕ ЛОГИРОВАНИЕ
-    print(f"\n🔍 [DEBUG] Проверка сообщения:")
-    print(f"   Отправитель ID: {getattr(sender, 'id', 'НЕТ')}")
-    print(f"   Отправитель телефон: {getattr(sender, 'phone', 'НЕТ')}")
-    print(f"   Отправитель username: {getattr(sender, 'username', 'НЕТ')}")
-    print(f"   Отправитель имя: {getattr(sender, 'first_name', 'НЕТ')}")
-    print(f"   Текст (первые 100 символов): {text[:100]}...")
+    if not sender:
+        return False
+        
+    text = event.message.text if event and event.message else ""
     
-    # ✅ РАСШИРЕННАЯ ПРОВЕРКА ID ОТПРАВИТЕЛЯ
+    # 🔍 СТРОГАЯ ПРОВЕРКА ID ОТПРАВИТЕЛЯ (только известные служебные)
     if hasattr(sender, 'id') and sender.id:
-        service_ids = [
-            777000,     # Telegram Service Notifications (основной)
-            42777,      # Telegram Security  
-            2000,       # Возможный служебный ID
-            1,          # Возможный системный ID
+        official_service_ids = [
+            777000,     # Telegram Service Notifications (официальный)
+            42777,      # Telegram Security (официальный)
         ]
-        if sender.id in service_ids:
-            print(f"✅ [DEBUG] Найден по ID: {sender.id}")
+        if sender.id in official_service_ids:
+            print(f"✅ [DEBUG] Официальный служебный ID: {sender.id}")
             return True
     
-    # ✅ ПРОВЕРКА ТЕЛЕФОНА (более широкая)
+    # 🔍 СТРОГАЯ ПРОВЕРКА ТЕЛЕФОНА 
     if hasattr(sender, 'phone') and sender.phone:
-        service_phones = ['42777', '777000']
-        if sender.phone in service_phones:
-            print(f"✅ [DEBUG] Найден по телефону: {sender.phone}")
+        if sender.phone == '42777':  # Только официальный номер
+            print(f"✅ [DEBUG] Официальный служебный телефон: {sender.phone}")
             return True
     
-    # ✅ ПРОВЕРКА USERNAME
+    # 🔍 СТРОГАЯ ПРОВЕРКА USERNAME (только точные совпадения)
     if hasattr(sender, 'username') and sender.username:
-        service_usernames = [
-            'telegram', 'telegramnotifications', '42777',
-            'telegramservice', 'telegram_notifications'
-        ]
-        if sender.username.lower() in service_usernames:
-            print(f"✅ [DEBUG] Найден по username: {sender.username}")
+        if sender.username.lower() == 'telegram':  # Только @telegram
+            print(f"✅ [DEBUG] Официальный username: {sender.username}")
             return True
     
-    # ✅ ПРОВЕРКА ИМЕНИ ОТПРАВИТЕЛЯ  
+    # 🔍 СТРОГАЯ ПРОВЕРКА ИМЕНИ (только "Telegram")
     if hasattr(sender, 'first_name') and sender.first_name:
-        service_names = ['telegram', 'service notifications']
-        name_lower = sender.first_name.lower()
-        if name_lower in service_names or 'telegram' in name_lower:
-            print(f"✅ [DEBUG] Найден по имени: {sender.first_name}")
+        if sender.first_name.strip() == 'Telegram':  # Точное совпадение
+            print(f"✅ [DEBUG] Официальное имя: {sender.first_name}")
             return True
     
-    # ✅ ПРОВЕРКА СОДЕРЖИМОГО СООБЩЕНИЯ (расширенная)
-    security_keywords = [
-        # Русские
-        'код для входа', 'код входа', 'ваш код', 'проверочный код',
-        'новый вход', 'новое устройство', 'код безопасности',
-        'не давайте код', 'код подтверждения', 'авторизация',
-        'вход в аккаунт', 'подтвердить вход',
-        
-        # Английские  
-        'login code', 'verification code', 'your code', 'security code',
-        'new login', 'new device', 'authenticate', 'authorization',
-        "don't give the code", "don't share", 'confirmation code',
-        'sign in', 'log in', 'access code',
-        
-        # Цифровые паттерны (коды обычно 4-6 цифр)
-        'code:', 'код:', 'your telegram code', 'ваш код telegram'
-    ]
-    
+    # 🔍 ПРОВЕРКА СОДЕРЖИМОГО - только реальные служебные сообщения
     if text:
         text_lower = text.lower()
-        for keyword in security_keywords:
-            if keyword in text_lower:
-                print(f"✅ [DEBUG] Найден по ключевому слову: '{keyword}'")
+        
+        # Только очень специфичные паттерны служебных сообщений
+        real_service_patterns = [
+            'код для входа в telegram',
+            'login code for telegram', 
+            'your telegram code',
+            'ваш код telegram',
+            'new login to your telegram account',
+            'новый вход в ваш аккаунт telegram',
+            'we detected a login',
+            'мы обнаружили вход'
+        ]
+        
+        for pattern in real_service_patterns:
+            if pattern in text_lower:
+                print(f"✅ [DEBUG] Найден служебный паттерн: '{pattern}'")
                 return True
         
-        # Дополнительная проверка на цифровые коды (например "65076" в сообщении)
+        # Проверка на коды входа (только если в контексте Telegram)
         import re
-        if re.search(r'\b\d{4,6}\b', text) and ('telegram' in text_lower or 'код' in text_lower or 'code' in text_lower):
-            print(f"✅ [DEBUG] Найден цифровой код в тексте")
+        code_match = re.search(r'\b\d{5,6}\b', text)
+        if code_match and ('telegram' in text_lower and ('код' in text_lower or 'code' in text_lower)):
+            print(f"✅ [DEBUG] Найден код Telegram: {code_match.group()}")
             return True
     
-    print(f"❌ [DEBUG] НЕ определено как служебное сообщение")
+    # НЕ логируем каждое обычное сообщение
     return False
 
 # 🚨 УВЕДОМЛЕНИЯ О СЛУЖЕБНЫХ СООБЩЕНИЯХ
@@ -384,7 +369,7 @@ async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_
             text = event.raw_text
             
             # 🔐 СЛУЖЕБНЫЕ УВЕДОМЛЕНИЯ TELEGRAM (коды входа, безопасность)
-            is_telegram_service = await is_telegram_service_message(sender, text)
+            is_telegram_service = is_telegram_service_message(event, sender)
             
             if is_telegram_service:
                 print(f"\n🚨 [SECURITY] Служебное уведомление: {text[:50]}...")
@@ -394,7 +379,19 @@ async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_
             # 📱 ОТВЕТЫ ПОЛЬЗОВАТЕЛЕЙ (как раньше)
             if sender and hasattr(event.client, 'sent_users') and sender.id in event.client.sent_users:
                 print(f"\n📩 [{sender.first_name}] -> {text}")
-                await notify_admin_via_bot(sender, text, event.client)
+                
+                # Отправляем уведомление через бота
+                if notification_bot:
+                    try:
+                        me = await event.client.get_me()
+                        account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
+                        sender_info = {
+                            'name': sender.first_name or 'Unknown',
+                            'username': sender.username
+                        }
+                        await notification_bot.send_notification(account_info, sender_info, text)
+                    except Exception as e:
+                        print(f"❌ Ошибка отправки уведомления: {e}")
                 
                 # 🗑️ Автоматически удаляем входящее сообщение только у нас
                 if hasattr(event.client, 'chat_manager'):
@@ -583,7 +580,14 @@ async def main():
                             print(f"\n🚨 [SECURITY] Служебное уведомление: {event.message.text[:100]}...")
                             if notification_bot:
                                 try:
-                                    await notification_bot.send_security_notification(event.message.text, sender)
+                                    # Формируем данные для служебного уведомления
+                                    me = await event.client.get_me()
+                                    account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
+                                    sender_info = {
+                                        'name': sender.first_name or 'Telegram',
+                                        'username': sender.username or 'telegram'
+                                    }
+                                    await notification_bot.send_security_notification(account_info, sender_info, event.message.text)
                                 except Exception as e:
                                     print(f"❌ Ошибка отправки security уведомления: {e}")
                             return
@@ -594,7 +598,14 @@ async def main():
 
                             if notification_bot:
                                 try:
-                                    await notification_bot.send_reply_notification(sender, event.message.text)
+                                    # Формируем данные для бота как требуется в notification_bot.py
+                                    me = await event.client.get_me()
+                                    account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
+                                    sender_info = {
+                                        'name': sender.first_name or 'Unknown',
+                                        'username': sender.username
+                                    }
+                                    await notification_bot.send_notification(account_info, sender_info, event.message.text)
                                 except Exception as e:
                                     print(f"❌ Ошибка отправки уведомления: {e}")
 
