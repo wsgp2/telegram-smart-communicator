@@ -489,6 +489,7 @@ async def main():
         print("1 - Редактировать настройки")
         print("2 - Показать информацию о прокси")
         print("3 - Запустить рассылку + приём сообщений")
+        print("  3.1 - Только слушать входящие (без рассылки)")
         print("4 - Создать новую сессию")
         print("0 - Выход")
 
@@ -533,6 +534,81 @@ async def main():
             )
 
             print("\n[+] Все аккаунты теперь слушают входящие сообщения только от тех, кому отправляли...")
+            await asyncio.gather(*[client.run_until_disconnected() for client in sessions]            )
+
+        elif choice == "3.1":
+            print("\n👂 === РЕЖИМ ТОЛЬКО СЛУШАНИЯ ===")
+            
+            users = load_users(cfg["target_users_file"])
+            if not users:
+                print("[-] Пользователи не найдены в target_users.txt!")
+                continue
+                
+            print(f"[+] Будем слушать ответы от {len(users)} пользователей из target_users.txt")
+            
+            proxies = load_proxies()
+            sessions = await load_sessions(
+                cfg["api_id"],
+                cfg["api_hash"],
+                proxies,
+                cfg["accounts_per_proxy"],
+                cfg["proxy_type"],
+                cfg["admin_username"]
+            )
+            if not sessions:
+                print("[-] Нет доступных сессий!")
+                continue
+            
+            print(f"[+] Загружено {len(sessions)} сессий для прослушивания")
+            
+            # Настраиваем обработчик входящих сообщений для каждой сессии
+            for client in sessions:
+                client.sent_users = set()  # Список пользователей, которых слушаем
+                for user in users:  # Загружаем пользователей из target_users.txt
+                    try:
+                        entity = await client.get_entity(user)
+                        client.sent_users.add(entity.id)
+                        print(f"[+] Добавлен для прослушивания: {user}")
+                    except Exception as e:
+                        print(f"[-] Ошибка получения {user}: {e}")
+
+                # Добавляем обработчик входящих сообщений
+                @client.on(events.NewMessage(incoming=True))
+                async def handler(event):
+                    try:
+                        sender = await event.get_sender()
+                        
+                        # Проверяем - это служебное сообщение Telegram?
+                        if is_telegram_service_message(event, sender):
+                            print(f"\n🚨 [SECURITY] Служебное уведомление: {event.message.text[:100]}...")
+                            if notification_bot:
+                                try:
+                                    await notification_bot.send_security_notification(event.message.text, sender)
+                                except Exception as e:
+                                    print(f"❌ Ошибка отправки security уведомления: {e}")
+                            return
+
+                        # Проверяем только те сообщения от пользователей из target_users.txt
+                        if sender and hasattr(event.client, 'sent_users') and sender.id in event.client.sent_users:
+                            print(f"\n👂 [{sender.first_name if sender.first_name else 'Unknown'}] -> {event.message.text}")
+
+                            if notification_bot:
+                                try:
+                                    await notification_bot.send_reply_notification(sender, event.message.text)
+                                except Exception as e:
+                                    print(f"❌ Ошибка отправки уведомления: {e}")
+
+                            # Если включено auto_hide_chats, то удаляем входящее сообщение
+                            if cfg.get("auto_hide_chats", False):
+                                await asyncio.create_task(event.client.chat_manager.delete_incoming_message(event.message))
+
+                    except Exception as e:
+                        print(f"[-] Ошибка в обработчике: {e}")
+            
+            print("\n🎧 Начинаем прослушивание ответов от целевых пользователей...")
+            print("💡 Для выхода нажмите Ctrl+C")
+
+            # Ожидаем входящие сообщения
             await asyncio.gather(*[client.run_until_disconnected() for client in sessions])
 
         elif choice == "4":
