@@ -609,9 +609,9 @@ async def main():
                                 except Exception as e:
                                     print(f"❌ Ошибка отправки уведомления: {e}")
 
-                            # Если включено auto_hide_chats, то удаляем входящее сообщение
-                            if cfg.get("auto_hide_chats", False):
-                                await asyncio.create_task(event.client.chat_manager.delete_incoming_message(event.message))
+                            # 🗑️ Автоматически удаляем входящее сообщение только у нас (как в режиме 3)
+                            if hasattr(event.client, 'chat_manager'):
+                                asyncio.create_task(event.client.chat_manager.delete_incoming_message(event.message))
 
                     except Exception as e:
                         print(f"[-] Ошибка в обработчике: {e}")
