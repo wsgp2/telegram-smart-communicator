@@ -2,10 +2,11 @@ import os
 import json
 import asyncio
 import random
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.tl.functions.contacts import GetContactsRequest
 from telethon.errors import FloodWaitError, PeerFloodError
 import telethon
+
 
 CONFIG_FILE = "config.json"
 SESSION_FOLDER = "sessions"
@@ -14,6 +15,7 @@ PROXY_FOLDER = "proxies"
 
 
 # ---------- Загрузка/сохранение конфига ----------
+
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         # Создаем конфиг по умолчанию
@@ -26,8 +28,7 @@ def load_config():
             "message": "Привет!",
             "delay_ms": 1000,
             "messages_per_account": 1,
-            "proxy_type": "socks5",
-            "admin_username": ""  # Изменено с admin_id на admin_username
+            "proxy_type": "socks5"  # Новое поле: тип прокси
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(default_config, f, indent=4, ensure_ascii=False)
@@ -44,8 +45,7 @@ def load_config():
         "message": "Привет!",
         "delay_ms": 1000,
         "messages_per_account": 1,
-        "proxy_type": "socks5",
-        "admin_username": ""
+        "proxy_type": "socks5"
     }
 
     for key, value in defaults.items():
@@ -88,7 +88,9 @@ def load_proxies():
                 if not s:
                     continue
 
+                # Поддержка различных форматов прокси
                 if "://" in s:
+                    # Формат: тип://user:pass@host:port
                     proxy_parts = s.split("://")
                     proxy_type = proxy_parts[0].lower()
                     auth_host = proxy_parts[1]
@@ -105,6 +107,7 @@ def load_proxies():
 
                     proxies.append((proxy_type, host, port, user, pwd))
                 else:
+                    # Старый формат: host:port:user:pwd
                     parts = s.split(":")
                     try:
                         if len(parts) >= 2:
@@ -112,20 +115,23 @@ def load_proxies():
                             port = int(parts[1])
                             user = parts[2] if len(parts) > 2 else None
                             pwd = parts[3] if len(parts) > 3 else None
+                            # По умолчанию используем socks5 для старого формата
                             proxies.append(("socks5", host, port, user, pwd))
                     except Exception as e:
                         print(f"[!] Неверный формат прокси: {s} - {e}")
     return proxies
 
 
-# ---------- Создание прокси-кортежа ----------
+# ---------- Создание прокси-кортежа для Telethon ----------
 def create_proxy_tuple(proxy_info, proxy_type):
     proxy_type, host, port, user, pwd = proxy_info
+
+    # Преобразуем тип прокси в формат, понятный Telethon
     telethon_proxy_type = {
         "socks5": "socks5",
         "socks4": "socks4",
         "http": "http",
-        "https": "http",
+        "https": "http",  # Telethon использует "http" для HTTPS прокси
         "mtproto": "mtproto"
     }.get(proxy_type.lower(), "socks5")
 
@@ -135,18 +141,8 @@ def create_proxy_tuple(proxy_info, proxy_type):
         return (telethon_proxy_type, host, port, True)
 
 
-# ---------- Отправка админу ----------
-async def notify_admin(sender, text, client, admin_username):
-    if not admin_username:
-        return
-    try:
-        await client.send_message(admin_username, f"📩 Сообщение от {sender.first_name}: {text}")
-    except Exception as e:
-        print(f"[!] Ошибка отправки админу: {e}")
-
-
-# ---------- Загрузка сессий ----------
-async def load_sessions(api_id, api_hash, proxies, accounts_per_proxy, proxy_type, admin_username):
+# ---------- Загрузка сессий с прокси ----------
+async def load_sessions(api_id, api_hash, proxies, accounts_per_proxy, proxy_type):
     if not os.path.exists(SESSION_FOLDER):
         os.makedirs(SESSION_FOLDER)
         print(f"[!] Папка {SESSION_FOLDER} создана, но пустая.")
@@ -157,11 +153,14 @@ async def load_sessions(api_id, api_hash, proxies, accounts_per_proxy, proxy_typ
         print("[!] Нет файлов сессий в папке.")
         return []
 
+    # Правильное распределение аккаунтов по прокси
     assigned = []
     if proxies:
         if len(proxies) == 1:
+            # Если один прокси - используем его для всех аккаунтов
             assigned = [proxies[0]] * len(files)
         else:
+            # Если несколько прокси - равномерно распределяем аккаунты
             accounts_per_proxy = max(1, len(files) // len(proxies))
             for i, proxy in enumerate(proxies):
                 start_idx = i * accounts_per_proxy
@@ -169,6 +168,8 @@ async def load_sessions(api_id, api_hash, proxies, accounts_per_proxy, proxy_typ
                 for j in range(start_idx, end_idx):
                     if j < len(files):
                         assigned.append(proxy)
+
+            # Если остались аккаунты без прокси, распределяем их по существующим прокси
             remaining = len(files) - len(assigned)
             if remaining > 0:
                 for i in range(remaining):
@@ -203,46 +204,41 @@ async def load_sessions(api_id, api_hash, proxies, accounts_per_proxy, proxy_typ
                 print(f"[+] Загружен {me.first_name} ({me.phone}) -> {proxy_type}://{host}:{port}")
             else:
                 print(f"[+] Загружен {me.first_name} ({me.phone}) -> без прокси")
-
-            # Создаем словарь для хранения отправленных пользователей для этого клиента
-            client.sent_users = set()
-
             sessions.append(client)
 
         except Exception as e:
-            print(f"\n🔴 [X] Ошибка загрузки {fname}: {e}\n")
+            print(f"\n🔴 [X] Ошибка загрузки {fname}:")
+            print(f"   Тип ошибки: {type(e).__name__}")
+            print(f"   Полный текст: {str(e)}")
+            if hasattr(e, '__dict__'):
+                for attr, value in e.__dict__.items():
+                    if attr not in ['args']:
+                        print(f"   {attr}: {value}")
+            print()
 
     return sessions
 
 
 # ---------- Отправка сообщений ----------
-async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_username):
+async def send_messages(sessions, users, message, delay_ms, msgs_per_acc):
     if not users:
         print("[!] Нет пользователей для отправки сообщений")
         return
 
+    # Статистика отправки
     total_sent = 0
     total_errors = 0
     error_types = {}
-    random.shuffle(users)
 
-    # Создаем обработчики событий для каждого клиента
-    for client in sessions:
-        # Обработчик входящих сообщений только от пользователей, которым отправляли сообщения
-        @client.on(events.NewMessage(incoming=True))
-        async def handler(event):
-            sender = await event.get_sender()
-            # Проверяем, отправляли ли мы этому пользователю сообщение
-            if hasattr(event.client, 'sent_users') and sender.id in event.client.sent_users:
-                text = event.raw_text
-                print(f"\n📩 [{sender.first_name}] -> {text}")
-                await notify_admin(sender, text, event.client, admin_username)
+    # перемешиваем пользователей случайным образом
+    random.shuffle(users)
 
     for client in sessions:
         me = await client.get_me()
         print(f"\n=== Работаем через аккаунт: {me.first_name} ===")
 
         try:
+            # берем случайные пользователи для этой сессии
             targets = []
             if users:
                 for _ in range(min(msgs_per_acc, len(users))):
@@ -252,6 +248,7 @@ async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_
 
             for target in targets:
                 try:
+                    # Создаем уникальные сообщения
                     unique_messages = [
                         "Привет, я от Сергея, тестирую связь 👋",
                         "Здравствуйте! Сергей просил проверить связь",
@@ -261,40 +258,135 @@ async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_
                         "Привет, тестовое сообщение от Сергея ✌️",
                         "Добрый день! Сергей попросил протестировать связь"
                     ]
+                    
+                    # Выбираем случайное сообщение
                     random_message = random.choice(unique_messages)
-
-                    # Получаем информацию о пользователе, чтобы сохранить его ID
-                    entity = await client.get_entity(target)
-                    await client.send_message(entity, random_message)
+                    await client.send_message(target, random_message)
                     print(f"✅ [{me.first_name}] -> {target}: {random_message}")
-
-                    # Сохраняем ID пользователя, которому отправили сообщение
-                    client.sent_users.add(entity.id)
                     total_sent += 1
-
                 except Exception as e:
-                    print(f"\n🔴 [{me.first_name}] Ошибка при отправке {target}: {e}")
+                    # Детальное логирование ошибок Telegram
+                    print(f"\n🔴 [{me.first_name}] Ошибка при отправке {target}:")
+                    print(f"   Тип ошибки: {type(e).__name__}")
+                    print(f"   Полный текст: {str(e)}")
+                    
+                    # Специальная обработка ошибок лимитов
+                    if isinstance(e, FloodWaitError):
+                        wait_time = e.seconds
+                        hours = wait_time // 3600
+                        minutes = (wait_time % 3600) // 60
+                        secs = wait_time % 60
+                        print(f"   ⏰ ТОЧНОЕ время ожидания: {hours}ч {minutes}м {secs}с (всего {wait_time} сек)")
+                        
+                    elif isinstance(e, PeerFloodError):
+                        print(f"   🚫 PeerFloodError: Этот аккаунт отправил слишком много сообщений получателям")
+                        print(f"   ⏰ Рекомендуется ждать: 12-24 часа")
+                        print(f"   💡 Решение: Использовать другие аккаунты или новых получателей")
+                    
+                        
+                    elif "FloodWaitError" in str(type(e)) or "Too many requests" in str(e):
+                        if hasattr(e, 'seconds'):
+                            wait_time = e.seconds
+                            hours = wait_time // 3600
+                            minutes = (wait_time % 3600) // 60
+                            seconds = wait_time % 60
+                            print(f"   ⏰ Нужно ждать: {hours}ч {minutes}м {seconds}с (всего {wait_time} сек)")
+                        else:
+                            # Попробуем извлечь время из текста ошибки
+                            import re
+                            time_match = re.search(r'(\d+)', str(e))
+                            if time_match:
+                                wait_seconds = int(time_match.group(1))
+                                hours = wait_seconds // 3600
+                                minutes = (wait_seconds % 3600) // 60
+                                print(f"   ⏰ Примерное время ожидания: {hours}ч {minutes}м ({wait_seconds} сек)")
+                            else:
+                                print(f"   ⏰ Время ожидания не определено, рекомендуется подождать 1-24 часа")
+                    
+                    # Учитываем статистику ошибок  
                     total_errors += 1
                     error_type = type(e).__name__
                     error_types[error_type] = error_types.get(error_type, 0) + 1
+                    
+                    # Показать дополнительные атрибуты ошибки
+                    if hasattr(e, '__dict__'):
+                        for attr, value in e.__dict__.items():
+                            if attr not in ['args']:
+                                print(f"   {attr}: {value}")
+                    print()
 
                 base_delay = delay_ms / 1000.0
                 jitter = random.uniform(-0.355, 0.355)
                 await asyncio.sleep(max(0.1, base_delay + jitter))
 
         except Exception as e:
-            print(f"\n🔴 [{me.first_name}] Критическая ошибка: {e}")
-
-    print("\n" + "=" * 50)
-    print("📊 ИТОГОВАЯ СТАТИСТИКА")
-    print("=" * 50)
+            print(f"\n🔴 [{me.first_name}] Критическая ошибка при работе аккаунта:")
+            print(f"   Тип ошибки: {type(e).__name__}")
+            print(f"   Полный текст: {str(e)}")
+            if hasattr(e, '__dict__'):
+                for attr, value in e.__dict__.items():
+                    if attr not in ['args']:
+                        print(f"   {attr}: {value}")
+            print()
+        finally:
+            await client.disconnect()
+            print(f"[{me.first_name}] Сессия завершена")
+    
+    # Показать итоговую статистику
+    print("\n" + "="*50)
+    print("📊 ИТОГОВАЯ СТАТИСТИКА РАССЫЛКИ")
+    print("="*50)
     print(f"✅ Успешно отправлено: {total_sent}")
     print(f"❌ Ошибок: {total_errors}")
     if error_types:
         print("\n🔍 Типы ошибок:")
         for error_type, count in error_types.items():
             print(f"   {error_type}: {count}")
-    print("=" * 50)
+    print("="*50)
+
+
+# ---------- Редактирование настроек ----------
+def edit_settings(cfg):
+    print("\n=== Редактирование настроек ===")
+
+    # Доступные типы прокси
+    proxy_types = ["socks5", "socks4", "http", "https", "mtproto"]
+
+    for key in cfg:
+        if key == "proxy_type":
+            print(f"Доступные типы прокси: {', '.join(proxy_types)}")
+            new = input(f"{key} [{cfg[key]}]: ").strip()
+            if new and new.lower() in proxy_types:
+                cfg[key] = new.lower()
+            elif new:
+                print(f"Неверный тип прокси. Используется значение по умолчанию: {cfg[key]}")
+        else:
+            old = cfg[key]
+            new = input(f"{key} [{old}]: ").strip()
+            if new:
+                if key in ["delay_ms", "messages_per_account", "accounts_per_proxy", "api_id"]:
+                    try:
+                        cfg[key] = int(new)
+                    except ValueError:
+                        print(f"Неверное числовое значение для {key}. Используется старое значение: {old}")
+                else:
+                    cfg[key] = new
+
+    save_config(cfg)
+    print("[+] Настройки сохранены\n")
+
+
+# ---------- Показать информацию о прокси ----------
+def show_proxy_info(proxies):
+    if not proxies:
+        print("[!] Прокси не найдены")
+        return
+
+    print("\n=== Информация о прокси ===")
+    for i, proxy in enumerate(proxies, 1):
+        proxy_type, host, port, user, pwd = proxy
+        auth_info = f" (auth: {user}:{pwd})" if user and pwd else " (без авторизации)"
+        print(f"{i}. {proxy_type}://{host}:{port}{auth_info}")
 
 
 # ---------- MAIN ----------
@@ -305,7 +397,7 @@ async def main():
         print("\n=== Telegram Mass Sender (Console) ===")
         print("1 - Редактировать настройки")
         print("2 - Показать информацию о прокси")
-        print("3 - Запустить рассылку + приём сообщений")
+        print("3 - Запустить рассылку")
         print("0 - Выход")
 
         choice = input("Выберите действие: ").strip()
@@ -320,18 +412,23 @@ async def main():
         elif choice == "3":
             users = load_users(cfg["target_users_file"])
             if users:
-                print(f"[+] Загружено {len(users)} пользователей")
+                print(f"[+] Загружено {len(users)} пользователей из {cfg['target_users_file']}")
             else:
                 print("[!] Файл пуст, будут использоваться контакты аккаунтов")
 
             proxies = load_proxies()
+            if proxies:
+                print(f"[+] Загружено {len(proxies)} прокси")
+                show_proxy_info(proxies)
+            else:
+                print("[!] Прокси не найдены, аккаунты будут работать напрямую")
+
             sessions = await load_sessions(
                 cfg["api_id"],
                 cfg["api_hash"],
                 proxies,
                 cfg["accounts_per_proxy"],
-                cfg["proxy_type"],
-                cfg["admin_username"]
+                cfg["proxy_type"]
             )
 
             if not sessions:
@@ -339,71 +436,20 @@ async def main():
                 continue
 
             print(f"[+] Используется {len(sessions)} сессий")
+
             await send_messages(
                 sessions,
                 users,
                 cfg["message"],
                 cfg["delay_ms"],
-                cfg["messages_per_account"],
-                cfg["admin_username"]
+                cfg["messages_per_account"]
             )
-
-            print("\n[+] Все аккаунты теперь слушают входящие сообщения только от тех, кому отправляли...")
-            await asyncio.gather(*[client.run_until_disconnected() for client in sessions])
 
         elif choice == "0":
             print("Выход.")
             break
         else:
             print("Неверный выбор.")
-
-
-# ---------- Доп. функции ----------
-def edit_settings(cfg):
-    print("\n=== Редактирование настроек ===")
-    proxy_types = ["socks5", "socks4", "http", "https", "mtproto"]
-
-    for key in cfg:
-        if key == "proxy_type":
-            print(f"Доступные типы прокси: {', '.join(proxy_types)}")
-            new = input(f"{key} [{cfg[key]}]: ").strip()
-            if new and new.lower() in proxy_types:
-                cfg[key] = new.lower()
-        elif key in ["delay_ms", "messages_per_account", "accounts_per_proxy", "api_id"]:
-            old = cfg[key]
-            new = input(f"{key} [{old}]: ").strip()
-            if new:
-                try:
-                    cfg[key] = int(new)
-                except ValueError:
-                    print(f"Неверное число, оставляем {old}")
-        elif key == "admin_username":
-            old = cfg[key]
-            new = input(f"{key} [{old}]: ").strip()
-            if new:
-                # Убедимся, что username начинается с @
-                if not new.startswith('@'):
-                    new = '@' + new
-                cfg[key] = new
-        else:
-            old = cfg[key]
-            new = input(f"{key} [{old}]: ").strip()
-            if new:
-                cfg[key] = new
-
-    save_config(cfg)
-    print("[+] Настройки сохранены\n")
-
-
-def show_proxy_info(proxies):
-    if not proxies:
-        print("[!] Прокси не найдены")
-        return
-    print("\n=== Информация о прокси ===")
-    for i, proxy in enumerate(proxies, 1):
-        proxy_type, host, port, user, pwd = proxy
-        auth_info = f" (auth: {user}:{pwd})" if user and pwd else " (без авторизации)"
-        print(f"{i}. {proxy_type}://{host}:{port}{auth_info}")
 
 
 if __name__ == "__main__":

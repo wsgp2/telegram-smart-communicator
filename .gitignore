@@ -25,3 +25,4 @@ target_*_only.txt
 # Temporary files
 *.tmp
 *.temp
+Telethon/
