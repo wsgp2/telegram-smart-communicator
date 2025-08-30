@@ -26,3 +26,6 @@ target_*_only.txt
 *.tmp
 *.temp
 Telethon/
+
+# Junkyard folder with temporary/test files
+junkyard/
