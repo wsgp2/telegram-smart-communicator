@@ -635,10 +635,17 @@ async def main():
             
             try:
                 await asyncio.gather(*[client.run_until_disconnected() for client in sessions])
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, asyncio.CancelledError):
                 print("\n📴 Получен сигнал прерывания (Ctrl+C)")
+                # Корректно отключаем всех клиентов
+                for client in sessions:
+                    try:
+                        await client.disconnect()
+                    except:
+                        pass
                 await send_shutdown_notification()
                 print("✅ Завершение режима рассылки")
+                return  # Выходим из цикла меню корректно
             except Exception as e:
                 print(f"❌ Ошибка в режиме рассылки: {e}")
                 await send_shutdown_notification()
@@ -794,10 +801,17 @@ async def main():
             # Ожидаем входящие сообщения
             try:
                 await asyncio.gather(*[client.run_until_disconnected() for client in sessions])
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, asyncio.CancelledError):
                 print("\n📴 Получен сигнал прерывания (Ctrl+C)")
+                # Корректно отключаем всех клиентов
+                for client in sessions:
+                    try:
+                        await client.disconnect()
+                    except:
+                        pass
                 await send_shutdown_notification()
                 print("✅ Завершение режима прослушивания")
+                return  # Выходим из цикла меню корректно
             except Exception as e:
                 print(f"❌ Ошибка в режиме прослушивания: {e}")
                 await send_shutdown_notification()
@@ -929,9 +943,9 @@ async def run_main_with_cleanup():
     """🎯 Главная функция с корректной обработкой завершения"""
     try:
         await main()
-    except KeyboardInterrupt:
-        print("\n📴 Программа была прервана пользователем")
-        await send_shutdown_notification()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Эти исключения уже обработаны в main(), просто завершаемся тихо
+        pass
     except Exception as e:
         print(f"\n🔴 Критическая ошибка программы: {e}")
         await send_shutdown_notification()
