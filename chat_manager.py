@@ -21,6 +21,7 @@ class ChatManager:
     def __init__(self, client):
         self.client = client
         self.auto_delete_delay = 4  # Задержка удаления в секундах (3-5 сек)
+        self.processed_chats = set()  # 🎯 Кэш обработанных чатов (оптимизация API запросов)
     
     async def mute_chat(self, peer, duration=2147483647):
         """🔇 Мьютим чат (по умолчанию навсегда)"""
@@ -65,19 +66,36 @@ class ChatManager:
             return False
     
     async def hide_chat(self, username_or_id):
-        """👻 Полное скрытие чата: мьют + архив"""
+        """👻 Полное скрытие чата: мьют + архив (с оптимизацией повторных запросов)"""
         try:
-            # Получаем peer объект
-            if isinstance(username_or_id, str) and username_or_id.startswith('@'):
-                username_or_id = username_or_id[1:]  # Убираем @
+            # Получаем уникальный идентификатор чата для кэширования
+            if hasattr(username_or_id, 'id'):
+                # Это объект пользователя, используем его ID
+                chat_id = username_or_id.id
+            else:
+                # Это строка username или ID
+                if isinstance(username_or_id, str) and username_or_id.startswith('@'):
+                    username_or_id = username_or_id[1:]  # Убираем @
+                chat_id = str(username_or_id)
             
+            # 🎯 ОПТИМИЗАЦИЯ: Проверяем кэш обработанных чатов
+            if chat_id in self.processed_chats:
+                print(f"✅ Чат {chat_id} уже обработан, пропускаем мьют+архив (оптимизация)")
+                return True
+            
+            # Получаем peer объект для API запросов
             peer = await self.client.get_input_entity(username_or_id)
             
-            # Мьютим чат
+            # Мьютим чат (только первый раз!)
             muted = await self.mute_chat(peer)
             
-            # Архивируем чат  
+            # Архивируем чат (только первый раз!)
             archived = await self.archive_chat(peer)
+            
+            # Добавляем в кэш обработанных чатов
+            if muted and archived:
+                self.processed_chats.add(chat_id)
+                print(f"🎯 Чат {chat_id} добавлен в кэш (больше не будем мьютить/архивировать)")
             
             return muted and archived
             
@@ -168,6 +186,20 @@ class ChatManager:
         except Exception as e:
             print(f"❌ Ошибка установки автоудаления: {e}")
             return False
+    
+    def clear_processed_chats_cache(self):
+        """🗑️ Очищаем кэш обработанных чатов (для нового сеанса)"""
+        cleared_count = len(self.processed_chats)
+        self.processed_chats.clear()
+        print(f"🗑️ Очищен кэш обработанных чатов ({cleared_count} записей)")
+        return cleared_count
+    
+    def get_optimization_stats(self):
+        """📊 Статистика оптимизации API запросов"""
+        return {
+            'processed_chats_count': len(self.processed_chats),
+            'saved_api_calls': len(self.processed_chats) * 2  # 2 запроса на чат (мьют + архив)
+        }
 
 async def auto_hide_targets():
     """🎯 Автоматически скрываем чаты с целевыми пользователями"""
