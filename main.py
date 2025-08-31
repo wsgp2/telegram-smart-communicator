@@ -9,10 +9,10 @@ from telethon.tl.functions.messages import DeleteHistoryRequest
 import telethon
 
 # 🤖 Импортируем бот для уведомлений
-import notification_bot as nb
+import notification_bot as nb  # type: ignore
 
 # 🗂️ Импортируем чат-менеджер
-from chat_manager import ChatManager
+from chat_manager import ChatManager  # type: ignore
 
 CONFIG_FILE = "config.json"
 SESSION_FOLDER = "sessions"
@@ -444,8 +444,7 @@ async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_
     random.shuffle(users)
 
     # Создаем обработчики событий для каждого клиента
-    for client in sessions:
-        # 🔍 РАСШИРЕННЫЙ ОБРАБОТЧИК: Ответы пользователей + Служебные уведомления Telegram
+    def create_message_handler(client):
         @client.on(events.NewMessage(incoming=True))
         async def handler(event):
             sender = await event.get_sender()
@@ -461,12 +460,16 @@ async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_
             
             # 📱 ОТВЕТЫ ПОЛЬЗОВАТЕЛЕЙ (как раньше)
             if sender and hasattr(event.client, 'sent_users') and sender.id in event.client.sent_users:
-                print(f"\n📩 [{sender.first_name}] -> {text}")
+                # Показываем информацию о получателе
+                me = await event.client.get_me()
+                receiver_name = me.first_name or 'Unknown'
+                receiver_phone = str(me.phone)[-4:] if me.phone else '????'
+                
+                print(f"\n📩 [{sender.first_name if sender.first_name else 'Unknown'}] -> [{receiver_name}(*{receiver_phone})] : {text}")
                 
                 # Отправляем уведомление через бота
                 if nb.notification_bot:
                     try:
-                        me = await event.client.get_me()
                         account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
                         sender_info = {
                             'name': sender.first_name or 'Unknown',
@@ -479,6 +482,11 @@ async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_
                 # 🗑️ Автоматически удаляем входящее сообщение только у нас
                 if hasattr(event.client, 'chat_manager'):
                     asyncio.create_task(event.client.chat_manager.delete_incoming_message(event.message))
+        return handler
+
+    # Создаем обработчики для всех клиентов
+    for client in sessions:
+        create_message_handler(client)
 
     for client in sessions:
         me = await client.get_me()
@@ -553,6 +561,15 @@ async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_
     print("=" * 50)
 
 
+# ---------- ФУНКЦИЯ ОТПРАВКИ УВЕДОМЛЕНИЯ О ВЫКЛЮЧЕНИИ ----------
+async def send_shutdown_notification():
+    """📴 Отправляет уведомление о выключении бота (принцип 20/80)"""
+    if nb.notification_bot:
+        try:
+            await nb.notification_bot.send_shutdown_notification()
+        except Exception as e:
+            print(f"❌ Ошибка отправки уведомления о выключении: {e}")
+
 # ---------- MAIN ----------
 async def main():
     cfg = load_config()
@@ -614,7 +631,18 @@ async def main():
             )
 
             print("\n[+] Все аккаунты теперь слушают входящие сообщения только от тех, кому отправляли...")
-            await asyncio.gather(*[client.run_until_disconnected() for client in sessions]            )
+            print("💡 Для выхода нажмите Ctrl+C")
+            
+            try:
+                await asyncio.gather(*[client.run_until_disconnected() for client in sessions])
+            except KeyboardInterrupt:
+                print("\n📴 Получен сигнал прерывания (Ctrl+C)")
+                await send_shutdown_notification()
+                print("✅ Завершение режима рассылки")
+            except Exception as e:
+                print(f"❌ Ошибка в режиме рассылки: {e}")
+                await send_shutdown_notification()
+                print("⚠️ Принудительное завершение режима рассылки")
 
         elif choice == "3.1":
             print("\n👂 === РЕЖИМ ТОЛЬКО СЛУШАНИЯ ===")
@@ -640,73 +668,140 @@ async def main():
                 continue
             
             print(f"[+] Загружено {len(sessions)} сессий для прослушивания")
+            print("\n🔍 НАСТРОЙКА ПРОСЛУШИВАНИЯ ДЛЯ КАЖДОГО АККАУНТА:")
+            print("=" * 60)
             
             # Настраиваем обработчик входящих сообщений для каждой сессии
+            for idx, client in enumerate(sessions, 1):
+                try:
+                    me = await client.get_me()
+                    print(f"\n📱 АККАУНТ #{idx}: {me.first_name} ({me.phone})")
+                    
+                    client.sent_users = set()  # Список пользователей, которых слушаем
+                    found_users = []
+                    failed_users = []
+                    
+                    for user in users:  # Загружаем пользователей из target_users.txt
+                        try:
+                            entity = await client.get_entity(user)
+                            client.sent_users.add(entity.id)
+                            found_users.append(user)
+                        except Exception as e:
+                            failed_users.append(f"{user} ({str(e)[:30]}...)")
+                    
+                    # Показываем результат для этого аккаунта
+                    print(f"   ✅ Может слушать: {len(found_users)} пользователей")
+                    if found_users:
+                        print(f"      📋 Список: {', '.join(found_users)}")
+                    
+                    if failed_users:
+                        print(f"   ❌ Не может найти: {len(failed_users)} пользователей")
+                        for failed in failed_users:
+                            print(f"      🔍 {failed}")
+                    
+                    if len(client.sent_users) == 0:
+                        print(f"   ⚠️ ВНИМАНИЕ: Аккаунт не может слушать НИКОГО!")
+                    
+                    # Создаем обработчик событий с правильным замыканием
+                    def create_handler(client):
+                        @client.on(events.NewMessage(incoming=True))
+                        async def handler(event):
+                            try:
+                                sender = await event.get_sender()
+                                
+                                # Проверяем - это служебное сообщение Telegram?
+                                if is_telegram_service_message(event, sender):
+                                    print(f"\n🚨 [SECURITY] Служебное уведомление: {event.message.text[:100]}...")
+                                    if nb.notification_bot:
+                                        try:
+                                            # Формируем данные для служебного уведомления
+                                            me = await event.client.get_me()
+                                            account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
+                                            sender_info = {
+                                                'name': sender.first_name or 'Telegram',
+                                                'username': sender.username or 'telegram'
+                                            }
+                                            await nb.notification_bot.send_security_notification(account_info, sender_info, event.message.text)
+                                        except Exception as e:
+                                            print(f"❌ Ошибка отправки security уведомления: {e}")
+                                    return
+
+                                # Проверяем только те сообщения от пользователей из target_users.txt
+                                if sender and hasattr(event.client, 'sent_users') and sender.id in event.client.sent_users:
+                                    # Получаем информацию о принимающем аккаунте
+                                    me = await event.client.get_me()
+                                    receiver_name = me.first_name or 'Unknown'
+                                    receiver_phone = str(me.phone)[-4:] if me.phone else '????'
+                                    
+                                    print(f"\n👂 [{sender.first_name if sender.first_name else 'Unknown'}] -> [{receiver_name}(*{receiver_phone})] : {event.message.text}")
+
+                                    if nb.notification_bot:
+                                        try:
+                                            # Формируем данные для бота как требуется в notification_bot.py
+                                            account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
+                                            sender_info = {
+                                                'name': sender.first_name or 'Unknown',
+                                                'username': sender.username
+                                            }
+                                            await nb.notification_bot.send_notification(account_info, sender_info, event.message.text)
+                                        except Exception as e:
+                                            print(f"❌ Ошибка отправки уведомления: {e}")
+
+                                    # 🗂️ Автоматически управляем чатом (как в режиме 3)
+                                    if hasattr(event.client, 'chat_manager'):
+                                        # 🗑️ Удаляем входящее сообщение только у нас
+                                        asyncio.create_task(event.client.chat_manager.delete_incoming_message(event.message))
+                                        # 🔇📂 Скрываем чат (мьют + архив) 
+                                        asyncio.create_task(event.client.chat_manager.hide_chat(sender))
+
+                            except Exception as e:
+                                print(f"[-] Ошибка в обработчике: {e}")
+                        return handler
+
+                    # Добавляем обработчик для этого клиента
+                    create_handler(client)
+                    
+                except Exception as e:
+                    print(f"   ❌ Ошибка настройки аккаунта: {e}")
+            
+            print("\n" + "=" * 60)
+            
+            # Подсчитываем итоговую статистику
+            total_listeners = 0
+            active_accounts = 0
+            inactive_accounts = 0
+            
             for client in sessions:
-                client.sent_users = set()  # Список пользователей, которых слушаем
-                for user in users:  # Загружаем пользователей из target_users.txt
-                    try:
-                        entity = await client.get_entity(user)
-                        client.sent_users.add(entity.id)
-                        print(f"[+] Добавлен для прослушивания: {user}")
-                    except Exception as e:
-                        print(f"[-] Ошибка получения {user}: {e}")
-
-                # Добавляем обработчик входящих сообщений
-                @client.on(events.NewMessage(incoming=True))
-                async def handler(event):
-                    try:
-                        sender = await event.get_sender()
-                        
-                        # Проверяем - это служебное сообщение Telegram?
-                        if is_telegram_service_message(event, sender):
-                            print(f"\n🚨 [SECURITY] Служебное уведомление: {event.message.text[:100]}...")
-                            if nb.notification_bot:
-                                try:
-                                    # Формируем данные для служебного уведомления
-                                    me = await event.client.get_me()
-                                    account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
-                                    sender_info = {
-                                        'name': sender.first_name or 'Telegram',
-                                        'username': sender.username or 'telegram'
-                                    }
-                                    await nb.notification_bot.send_security_notification(account_info, sender_info, event.message.text)
-                                except Exception as e:
-                                    print(f"❌ Ошибка отправки security уведомления: {e}")
-                            return
-
-                        # Проверяем только те сообщения от пользователей из target_users.txt
-                        if sender and hasattr(event.client, 'sent_users') and sender.id in event.client.sent_users:
-                            print(f"\n👂 [{sender.first_name if sender.first_name else 'Unknown'}] -> {event.message.text}")
-
-                            if nb.notification_bot:
-                                try:
-                                    # Формируем данные для бота как требуется в notification_bot.py
-                                    me = await event.client.get_me()
-                                    account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
-                                    sender_info = {
-                                        'name': sender.first_name or 'Unknown',
-                                        'username': sender.username
-                                    }
-                                    await nb.notification_bot.send_notification(account_info, sender_info, event.message.text)
-                                except Exception as e:
-                                    print(f"❌ Ошибка отправки уведомления: {e}")
-
-                            # 🗂️ Автоматически управляем чатом (как в режиме 3)
-                            if hasattr(event.client, 'chat_manager'):
-                                # 🗑️ Удаляем входящее сообщение только у нас
-                                asyncio.create_task(event.client.chat_manager.delete_incoming_message(event.message))
-                                # 🔇📂 Скрываем чат (мьют + архив) 
-                                asyncio.create_task(event.client.chat_manager.hide_chat(sender))
-
-                    except Exception as e:
-                        print(f"[-] Ошибка в обработчике: {e}")
+                if hasattr(client, 'sent_users') and len(client.sent_users) > 0:
+                    total_listeners += len(client.sent_users)
+                    active_accounts += 1
+                else:
+                    inactive_accounts += 1
+            
+            print(f"\n📊 ИТОГОВАЯ СТАТИСТИКА ПРОСЛУШИВАНИЯ:")
+            print(f"   🟢 Активных аккаунтов (могут слушать): {active_accounts}")
+            print(f"   🔴 Неактивных аккаунтов: {inactive_accounts}")
+            print(f"   👂 Общее количество подключений для прослушивания: {total_listeners}")
+            
+            if active_accounts == 0:
+                print("   ⚠️ КРИТИЧЕСКОЕ ПРЕДУПРЕЖДЕНИЕ: НИ ОДИН АККАУНТ НЕ МОЖЕТ СЛУШАТЬ!")
+                print("   💡 Проверьте target_users.txt и права доступа аккаунтов")
+                input("   🔄 Нажмите Enter для продолжения...")
             
             print("\n🎧 Начинаем прослушивание ответов от целевых пользователей...")
             print("💡 Для выхода нажмите Ctrl+C")
 
             # Ожидаем входящие сообщения
-            await asyncio.gather(*[client.run_until_disconnected() for client in sessions])
+            try:
+                await asyncio.gather(*[client.run_until_disconnected() for client in sessions])
+            except KeyboardInterrupt:
+                print("\n📴 Получен сигнал прерывания (Ctrl+C)")
+                await send_shutdown_notification()
+                print("✅ Завершение режима прослушивания")
+            except Exception as e:
+                print(f"❌ Ошибка в режиме прослушивания: {e}")
+                await send_shutdown_notification()
+                print("⚠️ Принудительное завершение режима прослушивания")
 
         elif choice == "4":
             # Создание новой сессии
@@ -717,7 +812,9 @@ async def main():
             input("\n🔄 Нажмите Enter для продолжения...")
 
         elif choice == "0":
-            print("Выход.")
+            print("📴 Завершение работы...")
+            await send_shutdown_notification()
+            print("✅ Все системы корректно остановлены")
             break
         else:
             print("Неверный выбор.")
@@ -828,5 +925,18 @@ def show_proxy_info(proxies):
         print(f"{i}. {proxy_type}://{host}:{port}{auth_info}")
 
 
+async def run_main_with_cleanup():
+    """🎯 Главная функция с корректной обработкой завершения"""
+    try:
+        await main()
+    except KeyboardInterrupt:
+        print("\n📴 Программа была прервана пользователем")
+        await send_shutdown_notification()
+    except Exception as e:
+        print(f"\n🔴 Критическая ошибка программы: {e}")
+        await send_shutdown_notification()
+    finally:
+        print("👋 До свидания!")
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(run_main_with_cleanup())

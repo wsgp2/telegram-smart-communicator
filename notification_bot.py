@@ -99,6 +99,30 @@ class NotificationBot:
             print(f"🔴 Ошибка теста бота: {e}")
             return False
 
+    async def send_shutdown_notification(self):
+        """📴 Уведомление о выключении бота"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                data = {
+                    'chat_id': self.group_chat_id,
+                    'text': '📴 <b>Бот уведомлений завершил работу</b>\n'
+                           f'🕐 Время остановки: {datetime.now().strftime("%d.%m.%Y %H:%M:%S")}\n'
+                           f'📊 Всего отправлено уведомлений: <code>{self.notification_count}</code>',
+                    'parse_mode': 'HTML'
+                }
+                
+                async with session.post(f"{self.api_url}/sendMessage", json=data) as response:
+                    if response.status == 200:
+                        print("✅ Уведомление о выключении отправлено")
+                        return True
+                    else:
+                        print(f"❌ Ошибка отправки уведомления о выключении: {response.status}")
+                        return False
+                        
+        except Exception as e:
+            print(f"🔴 Ошибка отправки уведомления о выключении: {e}")
+            return False
+
 # 📦 Глобальный экземпляр бота
 notification_bot = None
 
