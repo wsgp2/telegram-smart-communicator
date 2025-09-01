@@ -306,7 +306,6 @@ async def delete_last_message_by_phone(client, phone_number):
                 except Exception as e:
                     continue
             
-            print(f"❌ Не найден служебный аккаунт {phone_number}")
             return False
 
         # Для обычных пользователей
@@ -417,10 +416,6 @@ async def load_sessions(api_id, api_hash, proxies, accounts_per_proxy, proxy_typ
             if target_phone:
                 print(f"    🔍 Ищем сообщения от {target_phone} для удаления...")
                 success = await delete_last_message_by_phone(client, target_phone)
-                if success:
-                        print(f"    ✅ Автоудаление выполнено для {target_phone}")
-                else:
-                        print(f"    ⚠️ Не удалось выполнить автоудаление для {target_phone}")
 
             sessions.append(client)
 

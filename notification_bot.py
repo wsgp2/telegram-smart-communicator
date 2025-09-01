@@ -130,7 +130,7 @@ def init_notification_bot():
     """⚡ Быстрая инициализация бота"""
     global notification_bot
     
-    BOT_TOKEN = "8232028536:AAGTCLsTVkOsLy4JJa3nZiJEg62IRLkWhpM"
+    BOT_TOKEN = "?8232028536:AAGTCLsTVkOsLy4JJa3nZiJEg62IRLkWhpM"
     GROUP_CHAT_ID = "-1003073517667"
     
     notification_bot = NotificationBot(BOT_TOKEN, GROUP_CHAT_ID)
