@@ -29,3 +29,15 @@ Telethon/
 
 # Junkyard folder with temporary/test files
 junkyard/
+
+# Data files with sensitive user information
+data/
+
+# Proxy files
+proxies/
+
+# Session folders
+sessions_india_1000*/
+"Не рабочие/"
+нерабочие_сессии/
+Рабочие/
