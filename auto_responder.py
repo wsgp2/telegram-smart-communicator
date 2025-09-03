@@ -15,6 +15,9 @@ import aiohttp
 import httpx
 from openai import AsyncOpenAI
 
+# Настройка логгера
+logger = logging.getLogger('auto_responder')
+
 
 
 
@@ -121,6 +124,29 @@ class ConversationContext:
 
 # ---------------- Автоответчик ----------------
 class AutoResponder:
+    def __init__(self, config: Config):
+        """Инициализация автоответчика"""
+        self.config = config
+        self.conversations: Dict[str, ConversationContext] = {}
+        self.lock = asyncio.Lock()
+        self.client = None
+        self.enabled = False
+        self.ai_enabled = False
+        self.max_questions = config.max_questions
+        self.session_manager = None
+        
+        # Статистика
+        self.stats = {
+            'conversations_started': 0,
+            'questions_asked': 0,
+            'leads_completed': 0,
+            'cars_identified': 0,
+            'budgets_collected': 0
+        }
+        
+        # Инициализируем OpenAI клиент
+        self._init_openai_client()
+
     def _init_openai_client(self):
         """Инициализация OpenAI клиента с обработкой ошибок"""
         if not self.config.ai_enabled or not self.config.ai_api_key:
@@ -155,19 +181,10 @@ class AutoResponder:
         except Exception as e:
             logger.error(f"Failed to initialize OpenAI client: {e}")
             self.client = None
-        self.enabled = config.auto_responder_enabled
-        self.ai_enabled = config.ai_enabled and self.client is not None
-        self.max_questions = config.max_questions
-        self.session_manager = None
-
-        # Статистика
-        self.stats = {
-            'conversations_started': 0,
-            'questions_asked': 0,
-            'leads_completed': 0,
-            'cars_identified': 0,
-            'budgets_collected': 0
-        }
+        
+        # Обновляем состояние после инициализации OpenAI
+        self.enabled = self.config.auto_responder_enabled
+        self.ai_enabled = self.config.ai_enabled and self.client is not None
 
     def _parse_proxy_url(self, proxy_url: str) -> str:
         """Парсинг и форматирование URL прокси"""
@@ -466,10 +483,8 @@ auto_responder_instance: Optional[AutoResponder] = None
 def init_auto_responder(config_dict: dict, session_manager=None):
     global auto_responder_instance
     config = Config(config_dict)
-
-
-
-    auto_responder_instance = AutoResponder()
+    
+    auto_responder_instance = AutoResponder(config)
     if session_manager:
         auto_responder_instance.set_session_manager(session_manager)
     asyncio.create_task(auto_responder_instance.cleanup_sessions())
