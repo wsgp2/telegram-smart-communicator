@@ -1,210 +1,162 @@
 #!/usr/bin/env python3
-"""
-🗂️ МЕНЕДЖЕР ЧАТОВ - АВТОМАТИЧЕСКОЕ МЬЮТИРОВАНИЕ И АРХИВИРОВАНИЕ
-Скрывает чаты с получателями рассылки, но сохраняет возможность получатьф сообщения
-"""
 import asyncio
-import json
 from telethon import TelegramClient
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
 from telethon.tl.functions.folders import EditPeerFoldersRequest
 from telethon.tl.functions.messages import SetHistoryTTLRequest
 from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings, InputFolderPeer
-
+from collections import defaultdict
+from typing import Callable
 
 class ChatManager:
-    """🗂️ Менеджер для автоматического скрытия чатов"""
+    """Асинхронный менеджер чатов с кэшированием и очередью сообщений"""
 
-    def __init__(self, client):
+    def __init__(self, client: TelegramClient, auto_responder: Callable = None, auto_delete_delay: int = 4):
         self.client = client
-        self.auto_delete_delay = 4  # Задержка удаления в секундах (3-5 сек)
-        self.processed_chats = set()  # 🎯 Кэш обработанных чатов (оптимизация API запросов)
+        self.auto_responder = auto_responder  # callback для автоответа
+        self.auto_delete_delay = auto_delete_delay
+        self.processed_chats = set()  # кэш обработанных чатов
+        self.entity_cache = {}  # кэш InputEntity для уменьшения API запросов
+        self.message_queue = asyncio.Queue()
+        self.lock = asyncio.Lock()
+        self.running = False
 
+    # -----------------------
+    # Основной цикл обработки сообщений
+    # -----------------------
+    async def run(self):
+        """Асинхронный цикл обработки сообщений из очереди"""
+        if self.running:
+            return
+        self.running = True
+        while True:
+            msg_data = await self.message_queue.get()
+            target = msg_data.get("target")
+            text = msg_data.get("text")
+            await self.send_hide_and_mute(target, text)
+            self.message_queue.task_done()
+
+    # -----------------------
+    # Добавление сообщения в очередь
+    # -----------------------
+    async def queue_message(self, target, text: str):
+        """Добавляем сообщение в очередь на обработку"""
+        await self.message_queue.put({"target": target, "text": text})
+
+    # -----------------------
+    # Получение InputEntity с кэшированием
+    # -----------------------
+    async def get_peer(self, username_or_id):
+        if username_or_id in self.entity_cache:
+            return self.entity_cache[username_or_id]
+
+        if hasattr(username_or_id, 'id'):
+            entity = await self.client.get_input_entity(username_or_id)
+            self.entity_cache[username_or_id] = entity
+            return entity
+
+        if isinstance(username_or_id, str) and username_or_id.startswith('@'):
+            username_or_id = username_or_id[1:]
+
+        entity = await self.client.get_input_entity(username_or_id)
+        self.entity_cache[username_or_id] = entity
+        return entity
+
+    # -----------------------
+    # Мьют чата
+    # -----------------------
     async def mute_chat(self, peer, duration=2147483647):
         try:
             await self.client(UpdateNotifySettingsRequest(
                 peer=InputNotifyPeer(peer),
-                settings=InputPeerNotifySettings(
-                    mute_until=duration,
-                    sound=None,
-                    show_previews=False
-                )
+                settings=InputPeerNotifySettings(mute_until=duration, sound=None, show_previews=False)
             ))
-            print(f"✅ Чат замьючен: {peer}")
             return True
-        except Exception as e:
-            print(f"❌ Ошибка мьютинга чата {peer}: {e}")
-            print(f"   Пробуем альтернативный способ...")
-            try:
-                # Альтернативный способ через edit_2fa
-                entity = await self.client.get_entity(peer)
-                await self.client.edit_2fa(entity, mute_until=duration)
-                print(f"✅ Чат замьючен альтернативным способом: {peer}")
-                return True
-            except:
-                print(f"   Альтернативный способ тоже не сработал")
-                return False
-
-    async def archive_chat(self, peer):
-        """📂 Архивируем чат (перемещаем в папку архива)"""
-        try:
-            await self.client(EditPeerFoldersRequest(
-                folder_peers=[InputFolderPeer(
-                    peer=peer,
-                    folder_id=1  # 1 = Архив
-                )]
-            ))
-            print(f"✅ Чат заархивирован: {peer}")
-            return True
-        except Exception as e:
-            print(f"❌ Ошибка архивирования чата {peer}: {e}")
+        except:
             return False
 
-    async def hide_chat(self, username_or_id):
+    # -----------------------
+    # Архив чата
+    # -----------------------
+    async def archive_chat(self, peer, folder_id=1):
         try:
-            # Получаем уникальный идентификатор чата для кэширования
-            if hasattr(username_or_id, 'id'):
-                # Это объект пользователя, используем его ID
-                chat_id = username_or_id.id
-            else:
-                # Это строка username или ID
-                if isinstance(username_or_id, str) and username_or_id.startswith('@'):
-                    username_or_id = username_or_id[1:]  # Убираем @
-                chat_id = str(username_or_id)
-
-            # 🎯 ОПТИМИЗАЦИЯ: Проверяем кэш обработанных чатов
-            if chat_id in self.processed_chats:
-                print(f"✅ Чат {chat_id} уже обработан, пропускаем мьют+архив (оптимизация)")
-                return True
-
-            # Получаем peer объект для API запросов
-            peer = await self.client.get_input_entity(username_or_id)
-
-            # Мьютим чат (только первый раз!)
-            muted = await self.mute_chat(peer)
-
-            # Архивируем чат (только первый раз!)
-            archived = await self.archive_chat(peer)
-
-            # Добавляем в кэш обработанных чатов
-            if muted and archived:
-                self.processed_chats.add(chat_id)
-                print(f"🎯 Чат {chat_id} добавлен в кэш (больше не будем мьютить/архивировать)")
-
-            return muted and archived
-
-        except Exception as e:
-            print(f"❌ Ошибка скрытия чата {username_or_id}: {e}")
+            await self.client(EditPeerFoldersRequest(folder_peers=[InputFolderPeer(peer=peer, folder_id=folder_id)]))
+            return True
+        except:
             return False
 
-    async def send_and_hide_message(self, target, message_text):
-        """📤➡️🗑️ Отправляем сообщение и удаляем его с задержкой"""
+    # -----------------------
+    # Полный цикл: отправка + автоответ + мьют + архив
+    # -----------------------
+    async def send_hide_and_mute(self, target, message_text):
         try:
-            print(f"📤 Отправляем: {message_text}")
+            peer = await self.get_peer(target)
 
-            # Отправляем сообщение
-            sent_message = await self.client.send_message(target, message_text)
-            print(f"✅ Сообщение отправлено")
+            # Отправка сообщения
+            sent_msg = await self.client.send_message(peer, message_text)
+            asyncio.create_task(self._delayed_delete(sent_msg))
 
-            # Запускаем удаление с задержкой в фоне
-            asyncio.create_task(self._delayed_delete(sent_message))
+            # Мьют и архив, только если чат еще не обработан
+            if str(target) not in self.processed_chats:
+                muted = await self.mute_chat(peer)
+                archived = await self.archive_chat(peer)
+                if muted and archived:
+                    self.processed_chats.add(str(target))
 
-            return sent_message
+            # Вызов автоответчика
+            if self.auto_responder:
+                asyncio.create_task(self.auto_responder(peer, message_text))
 
+            return True
         except Exception as e:
-            print(f"❌ Ошибка отправки сообщения: {e}")
-            return None
+            print(f"❌ Ошибка send_hide_and_mute для {target}: {e}")
+            return False
 
+    # -----------------------
+    # Удаление сообщений с задержкой
+    # -----------------------
     async def _delayed_delete(self, message):
-        """🗑️ Тихий режим удаления сообщений"""
         try:
             await asyncio.sleep(self.auto_delete_delay)
             await message.delete(revoke=False)
-        except Exception:
+        except:
             pass
 
-    async def delete_incoming_message(self, message):
-        try:
-            await message.delete(revoke=False)
-        except Exception:
-            pass
-
-    async def send_hide_and_mute(self, target, message_text):
-        print(f"\n🎯 ПОЛНЫЙ ЦИКЛ ДЛЯ {target}")
-        print("-" * 30)
-
-        sent_message = await self.send_and_hide_message(target, message_text)
-        if not sent_message:
-            return False
-
-        await asyncio.sleep(1)
-        hidden = await self.hide_chat(target)
-
-        if hidden:
-            print(f"✅ Полный цикл завершен для {target}")
-            print(f"   📤 Сообщение отправлено")
-            print(f"   🗑️ Сообщение будет удалено через 4 сек")
-            print(f"   🔇 Чат замьючен")
-            print(f"   📂 Чат заархивирован")
-        else:
-            print(f"⚠️ Сообщение отправлено, но чат не скрыт")
-
-        return hidden
-
-    async def delete_incoming_message(self, message):
-        """🗑️ Удаляем входящее сообщение только у себя"""
-        try:
-            await message.delete(revoke=False)
-            print(f"🗑️ Входящее сообщение удалено только у нас")
-            return True
-        except Exception as e:
-            print(f"❌ Ошибка удаления входящего сообщения: {e}")
-            return False
-
+    # -----------------------
+    # Настройка автоудаления через 1 месяц
+    # -----------------------
     async def set_auto_delete_1_month(self, peer):
-        """⏰ Устанавливаем автоудаление сообщений через 1 месяц"""
         try:
-            # TTL = 2592000 секунд = 30 дней = 1 месяц
-            await self.client(SetHistoryTTLRequest(
-                peer=peer,
-                period=2592000  # 1 месяц в секундах
-            ))
-            print(f"⏰ Установлено автоудаление через 1 месяц: {peer}")
+            await self.client(SetHistoryTTLRequest(peer=peer, period=2592000))
             return True
-        except Exception as e:
-            print(f"❌ Ошибка установки автоудаления: {e}")
+        except:
             return False
 
-    def clear_processed_chats_cache(self):
-        """🗑️ Очищаем кэш обработанных чатов (для нового сеанса)"""
-        cleared_count = len(self.processed_chats)
+    # -----------------------
+    # Очистка кэшей
+    # -----------------------
+    def clear_cache(self):
+        processed = len(self.processed_chats)
         self.processed_chats.clear()
-        print(f"🗑️ Очищен кэш обработанных чатов ({cleared_count} записей)")
-        return cleared_count
+        self.entity_cache.clear()
+        print(f"🗑️ Очистка кэша: {processed} чатов сброшено")
 
-    async def get_chat_manager_stats(self):
-        """Получить статистику менеджера чатов с проверкой доступности"""
+    # -----------------------
+    # Статистика
+    # -----------------------
+    async def get_stats(self):
         try:
             me = await self.client.get_me()
-            stats = self.get_optimization_stats()
             return {
-                'account_name': me.first_name or 'Unknown',
-                'account_phone': me.phone or 'No phone',
-                'processed_chats': stats['processed_chats_count'],
-                'saved_api_calls': stats['saved_api_calls'],
-                'status': 'active'
+                "account_name": me.first_name,
+                "account_phone": me.phone,
+                "processed_chats": len(self.processed_chats),
+                "queued_messages": self.message_queue.qsize(),
             }
-        except Exception as e:
+        except:
             return {
-                'account_name': 'Error',
-                'account_phone': 'Error',
-                'processed_chats': 0,
-                'saved_api_calls': 0,
-                'status': f'error: {e}'
+                "account_name": "Error",
+                "account_phone": "Error",
+                "processed_chats": len(self.processed_chats),
+                "queued_messages": self.message_queue.qsize(),
             }
-    def get_optimization_stats(self):
-        """📊 Статистика оптимизации API запросов"""
-        return {
-            'processed_chats_count': len(self.processed_chats),
-            'saved_api_calls': len(self.processed_chats) * 2  # 2 запроса на чат (мьют + архив)
-        }

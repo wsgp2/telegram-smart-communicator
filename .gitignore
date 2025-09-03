@@ -37,7 +37,16 @@ data/
 proxies/
 
 # Session folders
+sessions/
 sessions_india_1000*/
 "Не рабочие/"
 нерабочие_сессии/
 Рабочие/
+
+# Session JSON files
+*.json
+
+# Archives (may contain sensitive data)
+*.zip
+*.rar
+*.tar.gz

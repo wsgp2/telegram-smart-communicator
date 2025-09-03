@@ -1,1033 +1,531 @@
-import os
-import json
+#!/usr/bin/env python3
+"""
+MASS SENDER С УВЕДОМЛЕНИЯМИ И УПРАВЛЕНИЕМ ЧАТАМИ
+Главный модуль системы с меню и автоматическим управлением
+"""
 import asyncio
-import random
-from telethon import TelegramClient, events
-from telethon.tl.functions.contacts import GetContactsRequest
-from telethon.errors import FloodWaitError, PeerFloodError
-from telethon.tl.functions.messages import DeleteHistoryRequest
-import telethon
+import os
+import sys
+from datetime import datetime
 
-# 🤖 Импортируем бот для уведомлений
-import notification_bot as nb  # type: ignore
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# 🗂️ Импортируем чат-менеджер
-from chat_manager import ChatManager  # type: ignore
-
-CONFIG_FILE = "config.json"
-SESSION_FOLDER = "sessions_india_1000"
-USERS_FILE = "target_users.txt"
-PROXY_FOLDER = "proxies"
+from session_manager import SessionManager
+from user_manager import UserManager
+from message_handler import MessageHandler
+from notification_bot import init_notification_bot, notification_bot
+from config import load_config, save_config
+from auto_responder import init_auto_responder, get_auto_responder
+import subprocess
+import sys
 
 
-# ---------- Загрузка/сохранение конфига ----------
-def load_config():
-    if not os.path.exists(CONFIG_FILE):
-        # Создаем конфиг по умолчанию
-        default_config = {
-            "api_id": "",
-            "api_hash": "",
-            "accounts_per_proxy": 1,
-            "proxy_mode": "auto",
-            "target_users_file": USERS_FILE,
-            "message": "Привет!",
-            "delay_ms": 1000,
-            "messages_per_account": 2,
-            "proxy_type": "socks5",
-                    "admin_username": "",  # Изменено с admin_id на admin_username
-        "auto_hide_chats": True,
-        "auto_delete_delay": 4,
-        "auto_ttl_messages": True
-        }
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(default_config, f, indent=4, ensure_ascii=False)
-        return default_config
 
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
+class MassSender:
+    def __init__(self):
+        self.config = load_config()
+        self.session_manager = SessionManager()
+        self.user_manager = UserManager()
+        self.message_handler = MessageHandler()
+        self.is_running = False
+        self.active_sessions = []
+        self.background_listener = None  # Инициализируем атрибут
+        self.shutdown_called = False  # Флаг для предотвращения двойного вызова shutdown
 
-    # Устанавливаем значения по умолчанию для отсутствующих полей
-    defaults = {
-        "accounts_per_proxy": 1,
-        "proxy_mode": "auto",
-        "target_users_file": USERS_FILE,
-        "message": "Привет!",
-        "delay_ms": 1000,
-        "messages_per_account": 1,
-        "proxy_type": "socks5",
-        "admin_username": "",
-        "auto_hide_chats": True,
-        "auto_delete_delay": 4,
-        "auto_ttl_messages": True
-    }
+    async def initialize(self):
+        """Инициализация системы"""
+        print("🚀 Инициализация Mass Sender...")
 
-    for key, value in defaults.items():
-        if key not in cfg:
-            cfg[key] = value
+        # Создаем необходимые папки
+        os.makedirs("sessions", exist_ok=True)
+        os.makedirs("proxies", exist_ok=True)
+        os.makedirs("data", exist_ok=True)
+        os.makedirs("logs", exist_ok=True)
 
-    return cfg
+        # Создаем необходимые файлы если их нет
+        for file in ["target_users.txt", "processed_users.txt", "new_users.txt", "phone_numbers.txt"]:
+            filepath = os.path.join("data", file)
+            if not os.path.exists(filepath):
+                with open(filepath, "w", encoding="utf-8") as f:
+                    pass
 
+        init_notification_bot()
 
-def save_config(cfg):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=4, ensure_ascii=False)
+        # Инициализируем автоответчик
+        init_auto_responder(self.config)
 
+        print("✅ Система инициализирована")
 
-# ---------- Загрузка списка пользователей ----------
-def load_users(users_file):
-    if not os.path.exists(users_file):
-        print(f"[!] Файл {users_file} не найден. Создан пустой.")
-        open(users_file, "w", encoding="utf-8").close()
-        return []
-    with open(users_file, "r", encoding="utf-8") as f:
-        return [line.strip() for line in f if line.strip()]
+    async def show_menu(self):
+        """Главное меню системы"""
+        while True:
+            print("\n" + "=" * 60)
+            print("🤖 MASS SENDER")
+            print("=" * 60)
+            print("1. 🎯 Запустить рассылку")
+            print("2. 📊 Показать статус системы")
+            print("3. 🔄 Перезагрузить сессии")
+            print("4. 📱 Конвертировать номера телефонов")
+            print("5. ⚙️  Настройки")
+            print("6. 📥 Добавить пользователей вручную")
+            print("7. 🔍 Проверить новые ресурсы")
+            print("8. 🗂️ Управление чатами")
+            print("0. ❌ Выход")
+            print("=" * 60)
 
-
-# ---------- Загрузка прокси ----------
-def load_proxies():
-    if not os.path.exists(PROXY_FOLDER):
-        os.makedirs(PROXY_FOLDER)
-        print(f"[!] Папка {PROXY_FOLDER} создана, но прокси не найдены.")
-        return []
-
-    proxies = []
-    for fname in os.listdir(PROXY_FOLDER):
-        path = os.path.join(PROXY_FOLDER, fname)
-        if not os.path.isfile(path):
-            continue
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                s = line.strip()
-                if not s:
-                    continue
-
-                if "://" in s:
-                    proxy_parts = s.split("://")
-                    proxy_type = proxy_parts[0].lower()
-                    auth_host = proxy_parts[1]
-
-                    if "@" in auth_host:
-                        auth, host_port = auth_host.split("@")
-                        user, pwd = auth.split(":") if ":" in auth else (auth, "")
-                    else:
-                        host_port = auth_host
-                        user, pwd = None, None
-
-                    host, port = host_port.split(":")
-                    port = int(port)
-
-                    proxies.append((proxy_type, host, port, user, pwd))
-                else:
-                    parts = s.split(":")
-                    try:
-                        if len(parts) >= 2:
-                            host = parts[0]
-                            port = int(parts[1])
-                            user = parts[2] if len(parts) > 2 else None
-                            pwd = parts[3] if len(parts) > 3 else None
-                            proxies.append(("socks5", host, port, user, pwd))
-                    except Exception as e:
-                        print(f"[!] Неверный формат прокси: {s} - {e}")
-    return proxies
-
-
-# ---------- Загрузка прокси из Индии ----------
-def load_india_proxies():
-    """Загружает прокси конкретно из файла proxys_india_1000.txt"""
-    proxy_file = os.path.join(PROXY_FOLDER, "proxys_india_1000.txt")
-    
-    if not os.path.exists(proxy_file):
-        print(f"[!] Файл {proxy_file} не найден.")
-        return []
-
-    proxies = []
-    with open(proxy_file, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            s = line.strip()
-            if not s:
-                continue
-
-            # Формат файла: host:port:user:pwd
-            parts = s.split(":")
             try:
-                if len(parts) >= 4:
-                    host = parts[0]
-                    port = int(parts[1])
-                    user = parts[2]
-                    pwd = parts[3]
-                    # Используем socks5 по умолчанию для прокси из Индии
-                    proxies.append(("socks5", host, port, user, pwd))
-                elif len(parts) >= 2:
-                    host = parts[0]
-                    port = int(parts[1])
-                    user = parts[2] if len(parts) > 2 else None
-                    pwd = parts[3] if len(parts) > 3 else None
-                    proxies.append(("socks5", host, port, user, pwd))
+                choice = input("Выберите опцию: ").strip()
+
+                if choice == "1":
+                    await self.start_sending_campaign()
+                elif choice == "2":
+                    await self.show_system_status()
+                elif choice == "3":
+                    await self.reload_sessions()
+                elif choice == "4":
+                    await self.convert_phone_numbers()
+                elif choice == "5":
+                    self.edit_settings()
+                elif choice == "6":
+                    await self.add_users_manually()
+                elif choice == "7":
+                    await self.check_new_resources()
+                elif choice == "8":
+                    await self.chat_management()
+                elif choice == "0":
+                    await self.shutdown()
+                    break
+                else:
+                    print("❌ Неверный выбор")
+            except KeyboardInterrupt:
+                print("\n🛑 Прервано пользователем")
+                await self.shutdown()
+                break
             except Exception as e:
-                print(f"[!] Неверный формат прокси из Индии: {s} - {e}")
-    
-    print(f"[+] Загружено {len(proxies)} прокси из Индии")
-    return proxies
+                print(f"❌ Ошибка: {e}")
 
 
-# ---------- Создание прокси-кортежа ----------
-def create_proxy_tuple(proxy_info, proxy_type):
-    proxy_type, host, port, user, pwd = proxy_info
-    telethon_proxy_type = {
-        "socks5": "socks5",
-        "socks4": "socks4",
-        "http": "http",
-        "https": "http",
-        "mtproto": "mtproto"
-    }.get(proxy_type.lower(), "socks5")
+    async def start_sending_campaign(self):
+        """Запуск кампании рассылки (чистый вывод)"""
+        print("\n🎯 ЗАПУСК РАССЫЛКИ")
+        print("=" * 50)
 
-    if user and pwd:
-        return (telethon_proxy_type, host, port, True, user, pwd)
-    else:
-        return (telethon_proxy_type, host, port, True)
+        sessions = await self.session_manager.load_sessions()
+        if not sessions:
+            print("❌ Нет доступных сессий!")
+            return
 
+        print(f"✅ Сессии: {len(sessions)}")
 
-# ---------- Отправка админу ----------
-async def notify_admin(sender, text, client, admin_username):
-    """УСТАРЕВШАЯ ФУНКЦИЯ - оставлена для совместимости"""
-    if not admin_username:
-        return
-    try:
-        await client.send_message(admin_username, f"📩 Сообщение от {sender.first_name}: {text}")
-    except Exception as e:
-        print(f"[!] Ошибка отправки админу: {e}")
+        users_data = await self.user_manager.load_all_users()
+        available_users = users_data["available"]
 
-# 🤖 НОВАЯ СИСТЕМА УВЕДОМЛЕНИЙ ЧЕРЕЗ БОТА
+        if not available_users:
+            print("❌ Нет пользователей для отправки!")
+            return
 
-# 🔐 ОПРЕДЕЛЕНИЕ СЛУЖЕБНЫХ СООБЩЕНИЙ TELEGRAM (УЛУЧШЕННАЯ ВЕРСИЯ)
-def is_telegram_service_message(event, sender):
-    """Определяет ТОЛЬКО реальные служебные сообщения от Telegram (улучшенная версия)"""
-    
-    if not sender:
-        return False
-        
-    text = event.message.text if event and event.message else ""
-    
-    # 🔍 СТРОГАЯ ПРОВЕРКА ID ОТПРАВИТЕЛЯ (только известные служебные)
-    if hasattr(sender, 'id') and sender.id:
-        official_service_ids = [
-            777000,     # Telegram Service Notifications (официальный)
-            42777,      # Telegram Security (официальный)
-        ]
-        if sender.id in official_service_ids:
-            print(f"✅ [DEBUG] Официальный служебный ID: {sender.id}")
-            return True
-    
-    # 🔍 СТРОГАЯ ПРОВЕРКА ТЕЛЕФОНА 
-    if hasattr(sender, 'phone') and sender.phone:
-        if sender.phone == '42777':  # Только официальный номер
-            print(f"✅ [DEBUG] Официальный служебный телефон: {sender.phone}")
-            return True
-    
-    # 🔍 СТРОГАЯ ПРОВЕРКА USERNAME (только точные совпадения)
-    if hasattr(sender, 'username') and sender.username:
-        if sender.username.lower() == 'telegram':  # Только @telegram
-            print(f"✅ [DEBUG] Официальный username: {sender.username}")
-            return True
-    
-    # 🔍 СТРОГАЯ ПРОВЕРКА ИМЕНИ (только "Telegram")
-    if hasattr(sender, 'first_name') and sender.first_name:
-        if sender.first_name.strip() == 'Telegram':  # Точное совпадение
-            print(f"✅ [DEBUG] Официальное имя: {sender.first_name}")
-            return True
-    
-    # 🔍 ПРОВЕРКА СОДЕРЖИМОГО - только реальные служебные сообщения
-    if text:
-        text_lower = text.lower()
-        
-        # Только очень специфичные паттерны служебных сообщений
-        real_service_patterns = [
-            'код для входа в telegram',
-            'login code for telegram', 
-            'your telegram code',
-            'ваш код telegram',
-            'new login to your telegram account',
-            'новый вход в ваш аккаунт telegram',
-            'we detected a login',
-            'мы обнаружили вход'
-        ]
-        
-        for pattern in real_service_patterns:
-            if pattern in text_lower:
-                print(f"✅ [DEBUG] Найден служебный паттерн: '{pattern}'")
-                return True
-        
-        # Проверка на коды входа (только если в контексте Telegram)
-        import re
-        code_match = re.search(r'\b\d{5,6}\b', text)
-        if code_match and ('telegram' in text_lower and ('код' in text_lower or 'code' in text_lower)):
-            print(f"✅ [DEBUG] Найден код Telegram: {code_match.group()}")
-            return True
-    
-    # НЕ логируем каждое обычное сообщение
-    return False
+        print(f"✅ Пользователей: {len(available_users)}")
 
-# 🚨 УВЕДОМЛЕНИЯ О СЛУЖЕБНЫХ СООБЩЕНИЯХ
-async def notify_telegram_service(sender, text, receiving_client):
-    """Отправка критических уведомлений о безопасности"""
-    if not nb.notification_bot:
-        return
-        
-    try:
-        me = await receiving_client.get_me()
-        
-        # Определяем тип уведомления
-        message_type = "🔐 СЛУЖЕБНОЕ УВЕДОМЛЕНИЕ"
-        if 'код для входа' in text.lower() or 'login code' in text.lower():
-            message_type = "🔑 КОД ВХОДА"
-        elif 'new login' in text.lower() or 'новый вход' in text.lower():
-            message_type = "🚨 НОВЫЙ ВХОД"
-        elif 'security' in text.lower() or 'безопасность' in text.lower():
-            message_type = "⚠️ БЕЗОПАСНОСТЬ"
-        
-        # Получаем информацию об аккаунте
-        account_info = {
-            'phone': me.phone,
-            'name': me.first_name or 'Unknown'
-        }
-        
-        # Информация об отправителе (Telegram Service)
-        sender_name = "Telegram Service"
-        if hasattr(sender, 'first_name') and sender.first_name:
-            sender_name = sender.first_name
-        elif hasattr(sender, 'username') and sender.username:
-            sender_name = f"@{sender.username}"
-        
-        sender_info = {
-            'name': sender_name,
-            'username': getattr(sender, 'username', 'telegram_service')
-        }
-        
-        # Отправляем КРИТИЧЕСКОЕ уведомление
-        await nb.notification_bot.send_security_notification(
-            account_info, sender_info, text, message_type
+        distribution = await self.user_manager.calculate_distribution(
+            len(sessions),
+            self.config["messages_per_account"],
+            self.config["max_messages_per_account"]
         )
+        confirm = input(f"\nОтправить {distribution['available_users']} сообщений? (y/n): ").lower()
+        if confirm != 'y':
+            print("❌ Отменено")
+            return
+        print("\n📤 Отправляем...")
+        sent_count = await self.message_handler.send_messages(
+            sessions,
+            available_users,
+            self.config["message"],
+            self.config["delay_ms"],
+            distribution["actual_per_account"]
+        )
+
+        print(f"\n✅ Готово! Отправлено: {sent_count} сообщений")
+        print("💬 Ответы пользователей будут приходить в Telegram-бота")
+
+
+
+    async def shutdown(self):
+        """Корректное завершение работы"""
+        # Предотвращаем повторный вызов
+        if self.shutdown_called:
+            return
+        self.shutdown_called = True
         
-    except Exception as e:
-        print(f"[!] Ошибка отправки служебного уведомления: {e}")
-        
+        print("\n📴 Завершение работы...")
 
-async def delete_last_message_by_phone(client, phone_number):
-    try:
-        # Для служебных аккаунтов Telegram используем специальный подход
-        if phone_number in ['42777', '777000']:
-            print(f"🔍 Удаление сообщения о входе Telegram: {phone_number}")
-            
-            dialogs = await client.get_dialogs()
-            
-            for dialog in dialogs:
-                try:
-                    entity = dialog.entity
-                    if (hasattr(entity, 'id') and 
-                        ((entity.id == 777000) or (hasattr(entity, 'phone') and str(entity.phone) == '42777'))):
-                        messages = await client.get_messages(entity, limit=10)
-                        for message in messages:
-                            if message.sender_id == entity.id:
-                                message_text = message.text or "[сообщение без текста]"
-                                if len(message_text) > 100:
-                                    message_preview = message_text[:100] + "..."
-                                else:
-                                    message_preview = message_text
-                                
-                                print(f"📝 Сообщение для удаления: {message_preview}")
-                                
-                                await message.delete()
-                                return True
-                        
-                        print(f"ℹ️ Не найдено служебных сообщений от {phone_number}")
-                        return False
-                        
-                except Exception as e:
-                    continue
-            
-            return False
+        # Останавливаем фоновое прослушивание если оно активно
+        if self.background_listener:
+            try:
+                await self.background_listener.stop_listener()
+                print("✅ Фоновое прослушивание остановлено")
+            except Exception as e:
+                print(f"⚠️ Ошибка остановки прослушивания: {e}")
 
-        # Для обычных пользователей
-        else:
-            # Получаем entity пользователя по номеру
-            entity = await client.get_entity(phone_number)
-            if not entity:
-                print(f"[-] Не найден пользователь с номером {phone_number}")
-                return False
-
-            # Получаем последние сообщения из диалога
-            messages = await client.get_messages(entity, limit=10)
-            
-            # Ищем последнее сообщение от целевого пользователя
-            for message in messages:
-                if message.sender_id == entity.id:
-                    # Показываем какое сообщение удаляем
-                    message_text = message.text or "[сообщение без текста]"
-                    if len(message_text) > 100:
-                        message_preview = message_text[:100] + "..."
-                    else:
-                        message_preview = message_text
-                    
-                    print(f"📝 Сообщение для удаления: {message_preview}")
-                    
-                    await message.delete()
-                    print(f"🗑️ Удалено последнее сообщение от {phone_number}")
-                    return True
-            
-            print(f"ℹ️ Не найдено сообщений от {phone_number}")
-            return False
-        
-    except Exception as e:
-        print(f"❌ Ошибка удаления сообщения от {phone_number}: {e}")
-        return False
-        
-# ---------- Загрузка сессий ----------
-async def load_sessions(api_id, api_hash, proxies, accounts_per_proxy, proxy_type, admin_username):
-    if not os.path.exists(SESSION_FOLDER):
-        os.makedirs(SESSION_FOLDER)
-        print(f"[!] Папка {SESSION_FOLDER} создана, но пустая.")
-        return []
-
-    files = [f for f in os.listdir(SESSION_FOLDER) if f.endswith(".session")]
-    if not files:
-        print("[!] Нет файлов сессий в папке.")
-        return []
-
-    assigned = []
-    if proxies:
-        if len(proxies) == 1:
-            assigned = [proxies[0]] * len(files)
-        else:
-            accounts_per_proxy = max(1, len(files) // len(proxies))
-            for i, proxy in enumerate(proxies):
-                start_idx = i * accounts_per_proxy
-                end_idx = min((i + 1) * accounts_per_proxy, len(files))
-                for j in range(start_idx, end_idx):
-                    if j < len(files):
-                        assigned.append(proxy)
-            remaining = len(files) - len(assigned)
-            if remaining > 0:
-                for i in range(remaining):
-                    proxy_idx = i % len(proxies)
-                    assigned.append(proxies[proxy_idx])
-    else:
-        assigned = [None] * len(files)
-
-    sessions = []
-    for idx, fname in enumerate(files):
-        name = os.path.splitext(fname)[0]
-        session_path = os.path.join(SESSION_FOLDER, name)
-        proxy_info = assigned[idx] if idx < len(assigned) else None
-
-        try:
-            if proxy_info:
-                proxy_tuple = create_proxy_tuple(proxy_info, proxy_type)
-                client = TelegramClient(session_path, int(api_id), api_hash, proxy=proxy_tuple)
-            else:
-                client = TelegramClient(session_path, int(api_id), api_hash)
-
-            await client.connect()
-
-            if not await client.is_user_authorized():
-                print(f"[X] {name} не авторизован.")
+        # Отключаем все сессии
+        sessions = self.session_manager.sessions + self.active_sessions
+        for client in sessions:
+            try:
                 await client.disconnect()
-                continue
+            except:
+                pass
 
-            me = await client.get_me()
-            if proxy_info:
-                proxy_type, host, port, user, pwd = proxy_info
-                print(f"[+] Загружен {me.first_name} ({me.phone}) -> {proxy_type}://{host}:{port}")
-            else:
-                print(f"[+] Загружен {me.first_name} ({me.phone}) -> без прокси")
+        # Отправляем уведомление о выключении
+        if notification_bot:
+            await notification_bot.send_shutdown_notification()
 
-            # Создаем словарь для хранения отправленных пользователей для этого клиента
-            client.sent_users = set()
-            
-            # 🗂️ Добавляем ChatManager если включено в настройках
-            cfg = load_config()
-            if cfg.get('auto_hide_chats', False):
-                client.chat_manager = ChatManager(client)
-                client.chat_manager.auto_delete_delay = cfg.get('auto_delete_delay', 4)
-                print(f"    🗂️ ChatManager подключен (авто-скрытие: ON)")
-                
+        print("✅ Система корректно остановлена")
 
-            target_phone = cfg.get("tg_phone", "").strip()
-            if target_phone:
-                print(f"    🔍 Ищем сообщения от {target_phone} для удаления...")
-                success = await delete_last_message_by_phone(client, target_phone)
+    async def show_system_status(self):
+        """Показать статус системы"""
+        print("\n📊 СТАТУС СИСТЕМЫ")
+        print("=" * 50)
 
-            sessions.append(client)
+        sessions = await self.session_manager.load_sessions()
+        users_data = await self.user_manager.load_all_users()
 
-        except Exception as e:
-            print(f"\n🔴 [X] Ошибка загрузки {fname}: {e}\n")
+        # Статистика сессий
+        session_stats = await self.session_manager.get_session_stats()
+        print(f"🔧 Сессии: {session_stats['total']} (активных: {session_stats['active']})")
 
-    return sessions
-   
+        # Статистика пользователей
+        print(f"👥 Пользователи:")
+        print(f"   • Целевые: {len(users_data['target'])}")
+        print(f"   • Обработанные: {len(users_data['processed'])}") 
+        print(f"   • Новые: {len(users_data['new'])}")
+        print(f"   • Номера телефонов: {len(users_data['phones'])}")
+        print(f"   • Доступно для отправки: {len(users_data['available'])}")
 
 
 
-# ---------- Отправка сообщений ----------
-async def send_messages(sessions, users, message, delay_ms, msgs_per_acc, admin_username):
-    if not users:
-        print("[!] Нет пользователей для отправки сообщений")
-        return
 
-    total_sent = 0
-    total_errors = 0
-    error_types = {}
-    random.shuffle(users)
+        print("=" * 50)
+        if sessions:
+            distribution = await self.user_manager.calculate_distribution(
+                len(sessions),
+                self.config["messages_per_account"]
+            )
+            self._print_distribution_info(distribution)
 
-    # Создаем обработчики событий для каждого клиента
-    def create_message_handler(client):
-        @client.on(events.NewMessage(incoming=True))
-        async def handler(event):
-            sender = await event.get_sender()
-            text = event.raw_text
-            
-            # 🔐 СЛУЖЕБНЫЕ УВЕДОМЛЕНИЯ TELEGRAM (коды входа, безопасность)
-            is_telegram_service = is_telegram_service_message(event, sender)
-            
-            if is_telegram_service:
-                print(f"\n🚨 [SECURITY] Служебное уведомление: {text[:50]}...")
-                await notify_telegram_service(sender, text, event.client)
-                return
-            
-            # 📱 ОТВЕТЫ ПОЛЬЗОВАТЕЛЕЙ (как раньше)
-            if sender and hasattr(event.client, 'sent_users') and sender.id in event.client.sent_users:
-                # Показываем информацию о получателе
-                me = await event.client.get_me()
-                receiver_name = me.first_name or 'Unknown'
-                receiver_phone = str(me.phone)[-4:] if me.phone else '????'
-                
-                print(f"\n📩 [{sender.first_name if sender.first_name else 'Unknown'}] -> [{receiver_name}(*{receiver_phone})] : {text}")
-                
-                # Отправляем уведомление через бота
-                if nb.notification_bot:
-                    try:
-                        account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
-                        sender_info = {
-                            'name': sender.first_name or 'Unknown',
-                            'username': sender.username
-                        }
-                        await nb.notification_bot.send_notification(account_info, sender_info, text)
-                    except Exception as e:
-                        print(f"❌ Ошибка отправки уведомления: {e}")
-                
-                # 🗑️ Автоматически удаляем входящее сообщение только у нас
-                if hasattr(event.client, 'chat_manager'):
-                    asyncio.create_task(event.client.chat_manager.delete_incoming_message(event.message))
-        return handler
+        # Статус бота
+        bot_status = "✅ Активен" if notification_bot else "❌ Неактивен"
+        print(f"🤖 Бот уведомлений: {bot_status}")
 
-    # Создаем обработчики для всех клиентов
-    for client in sessions:
-        create_message_handler(client)
+        # Статус автоответчика
+        auto_responder = get_auto_responder()
+        if auto_responder:
+            auto_stats = auto_responder.get_stats()
+            status = "✅ Включен" if auto_stats['enabled'] else "❌ Выключен"
+            print(f"🤖 Автоответчик: {status}")
+            if auto_stats['enabled']:
+                print(f"   • Активных разговоров: {auto_stats['active_conversations']}")
+                print(f"   • Завершенных лидов: {auto_stats['leads_completed']}")
+                print(f"   • Выяснено марок: {auto_stats['cars_identified']}")
+                print(f"   • Собрано бюджетов: {auto_stats['budgets_collected']}")
+        else:
+            print("🤖 Автоответчик: ❌ Не инициализирован")
 
-    for client in sessions:
-        me = await client.get_me()
-        print(f"\n=== Работаем через аккаунт: {me.first_name} ===")
+        print("=" * 50)
 
-        try:
-            targets = []
-            if users:
-                for _ in range(min(msgs_per_acc, len(users))):
-                    if users:
-                        target = users.pop(random.randrange(len(users)))
-                        targets.append(target)
+    def _print_distribution_info(self, distribution):
+        """Печать информации о распределении"""
+        print(f"\n📊 РАСПРЕДЕЛЕНИЕ:")
+        print(f"   • Доступно пользователей: {distribution['available_users']}")
+        print(f"   • Текущие сессии: {distribution['current_sessions']}")
+        print(f"   • Макс. на аккаунт: {distribution['max_per_account']}")
+        print(f"   • Можно отправить: {'✅ ДА' if distribution['can_send'] else '❌ НЕТ'}")
 
-            for target in targets:
+        if distribution['can_send']:
+            print(f"   • Сообщений на аккаунт: {distribution['actual_per_account']}")
+        else:
+            print(f"   • Нужно сессий: {distribution['needed_sessions']}")
+
+    async def reload_sessions(self):
+        """Перезагрузить сессии"""
+        print("\n🔄 ПЕРЕЗАГРУЗКА СЕССИЙ")
+        print("=" * 50)
+
+        old_count = len(self.session_manager.sessions)
+        sessions = await self.session_manager.load_sessions(force_reload=True)
+        new_count = len(sessions)
+
+        print(f"✅ Загружено сессий: {new_count}")
+        if new_count > old_count:
+            print(f"🎉 Добавлено новых сессий: {new_count - old_count}")
+
+        return sessions
+
+    async def convert_phone_numbers(self):
+        """Конвертировать номера телефонов"""
+        print("\n📱 КОНВЕРТАЦИЯ НОМЕРОВ")
+        print("=" * 50)
+
+        phones = await self.user_manager.load_users_async(self.config["phone_numbers_file"])
+        if not phones:
+            print("❌ Нет номеров для конвертации!")
+            print("💡 Добавьте номера в data/phone_numbers.txt")
+            return
+
+        print(f"✅ Найдено номеров: {len(phones)}")
+        print(f"📋 Первые 5: {', '.join(phones[:5])}{'...' if len(phones) > 5 else ''}")
+
+        confirm = input("\nНачать конвертацию? (y/n): ").lower()
+        if confirm != 'y':
+            print("❌ Отменено")
+            return
+
+        converted = await self.user_manager.convert_phones_to_usernames()
+        if converted > 0:
+            print(f"\n✅ Сконвертировано: {converted} номеров")
+
+            # Предлагаем переместить в целевые
+            move = input("Переместить сконвертированных пользователей в целевые? (y/n): ").lower()
+            if move == 'y':
+                moved = await self.user_manager.move_new_to_target()
+                print(f"✅ Перемещено: {moved} пользователей")
+        else:
+            print("❌ Не удалось сконвертировать номера")
+
+    def edit_settings(self):
+        """Редактирование настроек"""
+        print("\n⚙️ НАСТРОЙКИ")
+        print("=" * 50)
+
+        cfg = load_config()
+        print("Текущие настройки:")
+
+        for key, value in cfg.items():
+            if key not in ['last_session_check', 'last_user_check']:
+                print(f"   {key}: {value}")
+
+        print("\nРедактирование (оставьте пустым чтобы не менять):")
+
+        for key in cfg:
+            if key in ['api_id', 'api_hash', 'admin_username', 'message']:
+                new_val = input(f"{key} [{cfg[key]}]: ").strip()
+                if new_val:
+                    cfg[key] = new_val
+            elif key in ['delay_ms', 'messages_per_account', 'max_messages_per_account',
+                         'accounts_per_proxy', 'check_interval_minutes']:
                 try:
-                    unique_messages = [
-                        "Добрый день! Не смог дозвониться — покупка автомобиля ещё актуальна?",
-                        "Здравствуйте! Не дозвонился, интерес к покупке автомобиля сохраняется?",
-                        "Приветствую! Не удалось связаться — покупка автомобиля всё ещё в планах?",
-                        "Добрый день! Не дозвонился, вопрос по покупке автомобиля остаётся?",
-                        "Здравствуйте! Не получилось дозвониться — покупка автомобиля ещё нужна?",
-                        "Добрый день! Не смог дозвониться, покупка автомобиля актуальна?",
-                        "Приветствую! Не удалось дозвониться — покупка автомобиля в приоритете?",
-                        "Добрый день! Не дозвонился, покупка автомобиля остаётся важной?",
-                        "Здравствуйте! Не смог дозвониться — интерес к покупке автомобиля ещё есть?",
-                        "Добрый день! Не удалось связаться, покупка автомобиля актуальна для вас?",
-                        "Привет! Не дозвонился, покупка автомобиля ещё рассматривается?",
-                        "Добрый день! Не получилось дозвониться — покупка автомобиля остаётся?",
-                        "Здравствуйте! Не смог дозвониться, покупка автомобиля ещё интересует?",
-                        "Добрый день! Не дозвонился — покупка автомобиля для вас актуальна?",
-                        "Приветствую! Не удалось связаться, покупка автомобиля ещё важна?",
-                        "Добрый день! Не дозвонился, вопрос покупки автомобиля ещё открыт?",
-                        "Здравствуйте! Не смог дозвониться — покупка автомобиля остаётся в планах?",
-                        "Добрый день! Не удалось дозвониться, покупка автомобиля ещё в силе?",
-                        "Привет! Не дозвонился, покупка автомобиля остаётся актуальной?",
-                        "Добрый день! Не смог дозвониться — покупка автомобиля ещё нужна?",
-                        "Здравствуйте! Не получилось дозвониться, покупка автомобиля актуальна?",
-                        "Добрый день! Не дозвонился — покупка автомобиля ещё рассматривается?",
-                        "Приветствую! Не удалось дозвониться, интерес к покупке автомобиля остался?",
-                        "Добрый день! Не смог дозвониться — покупка автомобиля остаётся важной?",
-                        "Здравствуйте! Не дозвонился, покупка автомобиля всё ещё актуальна?",
-                        "Добрый день! Не удалось связаться — покупка автомобиля ещё интересует?",
-                        "Привет! Не дозвонился, покупка автомобиля остаётся актуальной для вас?",
-                        "Добрый день! Не смог дозвониться — вопрос покупки автомобиля ещё важен?",
-                        "Здравствуйте! Не получилось дозвониться, покупка автомобиля в приоритете?",
-                        "Добрый день! Не дозвонился — покупка автомобиля остаётся открытой темой?",
-                        "Приветствую! Не удалось дозвониться — покупка автомобиля нужна ещё?",
-                        "Добрый день! Не смог дозвониться, покупка автомобиля остаётся актуальной?",
-                        "Здравствуйте! Не дозвонился — интерес к покупке автомобиля всё ещё есть?",
-                        "Добрый день! Не удалось дозвониться — покупка автомобиля в силе?",
-                        "Привет! Не смог дозвониться, покупка автомобиля остаётся в планах?",
-                        "Добрый день! Не дозвонился — покупка автомобиля ещё рассматривается вами?",
-                        "Здравствуйте! Не получилось дозвониться, покупка автомобиля ещё важна?",
-                        "Добрый день! Не смог дозвониться — покупка автомобиля остаётся приоритетом?",
-                        "Приветствую! Не удалось дозвониться — покупка автомобиля ещё нужна?",
-                        "Добрый день! Не дозвонился, покупка автомобиля остаётся актуальной темой?",
-                        "Здравствуйте! Не смог дозвониться — интерес к покупке автомобиля живой?",
-                        "Добрый день! Не удалось дозвониться, покупка автомобиля остаётся важной?",
-                        "Привет! Не дозвонился — покупка автомобиля ещё актуальна для вас?",
-                        "Добрый день! Не смог дозвониться, покупка автомобиля остаётся в силе?",
-                        "Здравствуйте! Не получилось дозвониться — покупка автомобиля нужна ещё?",
-                        "Добрый день! Не дозвонился — покупка автомобиля остаётся актуальной?",
-                        "Приветствую! Не удалось дозвониться, интерес к покупке автомобиля есть?",
-                        "Добрый день! Не смог дозвониться — покупка автомобиля остаётся в приоритете?",
-                        "Здравствуйте! Не дозвонился — покупка автомобиля всё ещё важна для вас?",
-                        "Добрый день! Не удалось дозвониться, покупка автомобиля остаётся актуальной?"
-                    ]
-                    random_message = random.choice(unique_messages)
+                    new_val = input(f"{key} [{cfg[key]}]: ").strip()
+                    if new_val:
+                        cfg[key] = int(new_val)
+                except:
+                    pass
+            elif key in ['auto_hide_chats', 'auto_ttl_messages',
+                         'auto_check_new_sessions', 'auto_check_new_users']:
+                new_val = input(f"{key} [{'Да' if cfg[key] else 'Нет'}] (y/n): ").strip().lower()
+                if new_val:
+                    cfg[key] = (new_val == 'y')
+            elif key == 'auto_responder' and isinstance(cfg[key], dict):
+                print(f"\n🤖 Настройки автоответчика:")
+                print(f"   Текущий статус: {'Включен' if cfg[key]['enabled'] else 'Выключен'}")
+                
+                # Настройка включения/выключения
+                auto_enabled = input(f"Включить автоответчик [{'Да' if cfg[key]['enabled'] else 'Нет'}] (y/n): ").strip().lower()
+                if auto_enabled:
+                    cfg[key]['enabled'] = (auto_enabled == 'y')
+                
+                # Настройка AI ключа только если включен
+                if cfg[key]['enabled']:
+                    current_key = cfg[key]['ai']['api_key']
+                    key_display = current_key[:10] + "..." if current_key else "Не установлен"
+                    new_key = input(f"OpenAI API ключ [{key_display}]: ").strip()
+                    if new_key:
+                        cfg[key]['ai']['api_key'] = new_key
+                        
+                    # Настройка прокси
+                    proxy_enabled = cfg[key]['ai']['proxy']['enabled']
+                    proxy_status = "Включен" if proxy_enabled else "Выключен"
+                    proxy_change = input(f"Использовать прокси [{proxy_status}] (y/n): ").strip().lower()
+                    if proxy_change:
+                        cfg[key]['ai']['proxy']['enabled'] = (proxy_change == 'y')
+                        
+                    if cfg[key]['ai']['proxy']['enabled']:
+                        current_proxy = cfg[key]['ai']['proxy']['url']
+                        proxy_display = current_proxy[:30] + "..." if current_proxy else "Не установлен"
+                        new_proxy = input(f"Прокси URL [{proxy_display}]: ").strip()
+                        if new_proxy:
+                            cfg[key]['ai']['proxy']['url'] = new_proxy
+                        
+                    # Настройка максимума вопросов
+                    max_q = input(f"Макс. вопросов на клиента [{cfg[key]['max_questions']}]: ").strip()
+                    if max_q:
+                        try:
+                            cfg[key]['max_questions'] = int(max_q)
+                        except:
+                            pass
 
-                    # Получаем информацию о пользователе, чтобы сохранить его ID
-                    entity = await client.get_entity(target)
-                    
-                    # 🕐 СНАЧАЛА устанавливаем TTL если включено (до отправки сообщения)
-                    cfg = load_config()
-                    if cfg.get('auto_ttl_messages', False) and hasattr(client, 'chat_manager'):
-                        await client.chat_manager.set_auto_delete_1_month(entity)
-                    
-                    # 📤 Отправляем сообщение и получаем объект сообщения
-                    sent_message = await client.send_message(entity, random_message)
-                    print(f"✅ [{me.first_name}] -> {target}: {random_message}")
+        save_config(cfg)
+        self.config = cfg
+        print("✅ Настройки сохранены")
 
-                    # Сохраняем ID пользователя, которому отправили сообщение
-                    client.sent_users.add(entity.id)
-                    
-                    # 🗂️ Автоматически управляем чатом если включено
-                    if hasattr(client, 'chat_manager'):
-                        # 🗑️ Удаляем наше сообщение через задержку (только у нас)
-                        asyncio.create_task(client.chat_manager._delayed_delete(sent_message))
-                        # 🔇📂 Скрываем чат (мьют + архив)
-                        asyncio.create_task(client.chat_manager.hide_chat(target))
-                    total_sent += 1
+    async def add_users_manually(self):
+        """Добавить пользователей вручную"""
+        print("\n📥 ДОБАВЛЕНИЕ ПОЛЬЗОВАТЕЛЕЙ")
+        print("=" * 50)
 
-                except Exception as e:
-                    print(f"\n🔴 [{me.first_name}] Ошибка при отправке {target}: {e}")
-                    total_errors += 1
-                    error_type = type(e).__name__
-                    error_types[error_type] = error_types.get(error_type, 0) + 1
+        print("Введите username'ы (каждый с новой строки, Ctrl+D для завершения):")
+        print("Формат: @username или username")
 
-                base_delay = delay_ms / 1000.0
-                jitter = random.uniform(-0.355, 0.355)
-                await asyncio.sleep(max(0.1, base_delay + jitter))
-
-        except Exception as e:
-            print(f"\n🔴 [{me.first_name}] Критическая ошибка: {e}")
-
-    print("\n" + "=" * 50)
-    print("📊 ИТОГОВАЯ СТАТИСТИКА")
-    print("=" * 50)
-    print(f"✅ Успешно отправлено: {total_sent}")
-    print(f"❌ Ошибок: {total_errors}")
-    if error_types:
-        print("\n🔍 Типы ошибок:")
-        for error_type, count in error_types.items():
-            print(f"   {error_type}: {count}")
-    print("=" * 50)
-
-
-# ---------- ФУНКЦИЯ ОТПРАВКИ УВЕДОМЛЕНИЯ О ВЫКЛЮЧЕНИИ ----------
-async def send_shutdown_notification():
-    """📴 Отправляет уведомление о выключении бота (принцип 20/80)"""
-    if nb.notification_bot:
+        users = []
         try:
-            await nb.notification_bot.send_shutdown_notification()
-        except Exception as e:
-            print(f"❌ Ошибка отправки уведомления о выключении: {e}")
+            while True:
+                line = input().strip()
+                if line:
+                    if not line.startswith('@'):
+                        line = '@' + line
+                    users.append(line)
+        except EOFError:
+            pass
 
-# ---------- MAIN ----------
-async def main():
-    cfg = load_config()
-    
-    # 🤖 Инициализируем бот для уведомлений
-    nb.init_notification_bot()
-    
-    # 🧪 Тестируем бот
-    if nb.notification_bot:
-        await nb.notification_bot.test_connection()
+        if not users:
+            print("❌ Не добавлено пользователей")
+            return
 
-    while True:
-        print("\n=== Telegram Mass Sender (Console) ===")
-        print("1 - Редактировать настройки")
-        print("2 - Показать информацию о прокси")
-        print("3 - Запустить рассылку + приём сообщений")
-        print("  3.1 - Только слушать входящие (без рассылки)")
-        print("4 - Создать новую сессию")
-        print("0 - Выход")
+        await self.user_manager.add_new_users(users)
+        print(f"✅ Добавлено пользователей: {len(users)}")
+        print(f"📋 Добавлены: {', '.join(users[:5])}{'...' if len(users) > 5 else ''}")
 
-        choice = input("Выберите действие: ").strip()
+    async def check_new_resources(self):
+        """Проверить новые ресурсы"""
+        print("\n🔍 ПРОВЕРКА НОВЫХ РЕСУРСОВ")
+        print("=" * 50)
+
+        # Проверяем новые сессии
+        print("🔄 Проверяем новые сессии...")
+        sessions = await self.session_manager.reload_sessions_if_needed()
+        print(f"✅ Сессии: {len(sessions)}")
+
+        # Проверяем новых пользователей
+        print("📥 Проверяем новых пользователей...")
+        has_new_users = await self.user_manager.check_for_new_users()
+        if has_new_users:
+            added = await self.user_manager.move_new_to_target()
+            print(f"✅ Добавлено новых пользователей: {added}")
+        else:
+            print("❌ Новых пользователей нет")
+
+        # Проверяем новые номера
+        print("📱 Проверяем новые номера...")
+        has_new_phones = await self.user_manager.check_for_new_phones()
+        if has_new_phones:
+            print(f"✅ Найдены новые номера")
+            convert = input("Конвертировать сейчас? (y/n): ").lower()
+            if convert == 'y':
+                await self.convert_phone_numbers()
+        else:
+            print("❌ Новых номеров нет")
+
+        print("✅ Проверка завершена")
+
+
+
+    async def chat_management(self):
+        """Управление чатами"""
+        print("\n🗂️ УПРАВЛЕНИЕ ЧАТАМИ")
+        print("=" * 50)
+        print("1. 📊 Статистика чатов")
+        print("2. 🗑️ Очистить кэш чатов")
+        print("3. 🔙 Назад")
+
+        choice = input("Выберите опцию: ").strip()
 
         if choice == "1":
-            edit_settings(cfg)
-
-        elif choice == "2":
-            proxies = load_india_proxies()
-            show_proxy_info(proxies)
-
-        elif choice == "3":
-            users = load_users(cfg["target_users_file"])
-            if users:
-                print(f"[+] Загружено {len(users)} пользователей")
-            else:
-                print("[!] Файл пуст, будут использоваться контакты аккаунтов")
-
-            proxies = load_india_proxies()
-            sessions = await load_sessions(
-                cfg["api_id"],
-                cfg["api_hash"],
-                proxies,
-                cfg["accounts_per_proxy"],
-                cfg["proxy_type"],
-                cfg["admin_username"]
-            )
-
+            sessions = await self.session_manager.load_sessions()
             if not sessions:
-                print("[!] Нет рабочих аккаунтов.")
-                continue
+                print("❌ Нет доступных сессий")
+                return
 
-            print(f"[+] Используется {len(sessions)} сессий")
-            await send_messages(
-                sessions,
-                users,
-                cfg["message"],
-                cfg["delay_ms"],
-                cfg["messages_per_account"],
-                cfg["admin_username"]
-            )
+            print("\n📊 СТАТИСТИКА ЧАТОВ ПО СЕССИЯМ")
+            print("-" * 50)
 
-            print("\n[+] Все аккаунты теперь слушают входящие сообщения только от тех, кому отправляли...")
-            print("💡 Для выхода нажмите Ctrl+C")
-            
-            try:
-                await asyncio.gather(*[client.run_until_disconnected() for client in sessions])
-            except (KeyboardInterrupt, asyncio.CancelledError):
-                print("\n📴 Получен сигнал прерывания (Ctrl+C)")
-                # Корректно отключаем всех клиентов
-                for client in sessions:
-                    try:
-                        await client.disconnect()
-                    except:
-                        pass
-                await send_shutdown_notification()
-                print("✅ Завершение режима рассылки")
-                return  # Выходим из цикла меню корректно
-            except Exception as e:
-                print(f"❌ Ошибка в режиме рассылки: {e}")
-                await send_shutdown_notification()
-                print("⚠️ Принудительное завершение режима рассылки")
-
-        elif choice == "3.1":
-            print("\n👂 === РЕЖИМ ТОЛЬКО СЛУШАНИЯ ===")
-            
-            users = load_users(cfg["target_users_file"])
-            if not users:
-                print("[-] Пользователи не найдены в target_users.txt!")
-                continue
-                
-            print(f"[+] Будем слушать ответы от {len(users)} пользователей из target_users.txt")
-            
-            proxies = load_india_proxies()
-            sessions = await load_sessions(
-                cfg["api_id"],
-                cfg["api_hash"],
-                proxies,
-                cfg["accounts_per_proxy"],
-                cfg["proxy_type"],
-                cfg["admin_username"]
-            )
-            if not sessions:
-                print("[-] Нет доступных сессий!")
-                continue
-            
-            print(f"[+] Загружено {len(sessions)} сессий для прослушивания")
-            print("\n🔍 НАСТРОЙКА ПРОСЛУШИВАНИЯ ДЛЯ КАЖДОГО АККАУНТА:")
-            print("=" * 60)
-            
-            # Настраиваем обработчик входящих сообщений для каждой сессии
-            for idx, client in enumerate(sessions, 1):
+            for i, client in enumerate(sessions, 1):
                 try:
                     me = await client.get_me()
-                    print(f"\n📱 АККАУНТ #{idx}: {me.first_name} ({me.phone})")
-                    
-                    client.sent_users = set()  # Список пользователей, которых слушаем
-                    found_users = []
-                    failed_users = []
-                    
-                    for user in users:  # Загружаем пользователей из target_users.txt
-                        try:
-                            entity = await client.get_entity(user)
-                            client.sent_users.add(entity.id)
-                            found_users.append(user)
-                        except Exception as e:
-                            failed_users.append(f"{user} ({str(e)[:30]}...)")
-                    
-                    # Показываем результат для этого аккаунта
-                    print(f"   ✅ Может слушать: {len(found_users)} пользователей")
-                    if found_users:
-                        print(f"      📋 Список: {', '.join(found_users)}")
-                    
-                    if failed_users:
-                        print(f"   ❌ Не может найти: {len(failed_users)} пользователей")
-                        for failed in failed_users:
-                            print(f"      🔍 {failed}")
-                    
-                    if len(client.sent_users) == 0:
-                        print(f"   ⚠️ ВНИМАНИЕ: Аккаунт не может слушать НИКОГО!")
-                    
-                    # Создаем обработчик событий с правильным замыканием
-                    def create_handler(client):
-                        @client.on(events.NewMessage(incoming=True))
-                        async def handler(event):
-                            try:
-                                sender = await event.get_sender()
-                                
-                                # Проверяем - это служебное сообщение Telegram?
-                                if is_telegram_service_message(event, sender):
-                                    print(f"\n🚨 [SECURITY] Служебное уведомление: {event.message.text[:100]}...")
-                                    if nb.notification_bot:
-                                        try:
-                                            # Формируем данные для служебного уведомления
-                                            me = await event.client.get_me()
-                                            account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
-                                            sender_info = {
-                                                'name': sender.first_name or 'Telegram',
-                                                'username': sender.username or 'telegram'
-                                            }
-                                            await nb.notification_bot.send_security_notification(account_info, sender_info, event.message.text)
-                                        except Exception as e:
-                                            print(f"❌ Ошибка отправки security уведомления: {e}")
-                                    return
+                    phone_display = f"+{me.phone}" if me.phone else "No phone"
 
-                                # Проверяем только те сообщения от пользователей из target_users.txt
-                                if sender and hasattr(event.client, 'sent_users') and sender.id in event.client.sent_users:
-                                    # Получаем информацию о принимающем аккаунте
-                                    me = await event.client.get_me()
-                                    receiver_name = me.first_name or 'Unknown'
-                                    receiver_phone = str(me.phone)[-4:] if me.phone else '????'
-                                    
-                                    print(f"\n👂 [{sender.first_name if sender.first_name else 'Unknown'}] -> [{receiver_name}(*{receiver_phone})] : {event.message.text}")
+                    if hasattr(client, 'chat_manager'):
+                        stats = client.chat_manager.get_optimization_stats()
+                        print(f"{i}. {me.first_name or 'Unknown'} ({phone_display}):")
+                        print(f"   • Обработано чатов: {stats['processed_chats_count']}")
+                        print(f"   • Сэкономлено API запросов: {stats['saved_api_calls']}")
+                    else:
+                        print(f"{i}. {me.first_name or 'Unknown'} ({phone_display}):")
+                        print(f"   • ChatManager не активирован")
 
-                                    if nb.notification_bot:
-                                        try:
-                                            # Формируем данные для бота как требуется в notification_bot.py
-                                            account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
-                                            sender_info = {
-                                                'name': sender.first_name or 'Unknown',
-                                                'username': sender.username
-                                            }
-                                            await nb.notification_bot.send_notification(account_info, sender_info, event.message.text)
-                                        except Exception as e:
-                                            print(f"❌ Ошибка отправки уведомления: {e}")
-
-                                    # 🗂️ Автоматически управляем чатом (как в режиме 3)
-                                    if hasattr(event.client, 'chat_manager'):
-                                        # 🗑️ Удаляем входящее сообщение только у нас
-                                        asyncio.create_task(event.client.chat_manager.delete_incoming_message(event.message))
-                                        # 🔇📂 Скрываем чат (мьют + архив) 
-                                        asyncio.create_task(event.client.chat_manager.hide_chat(sender))
-
-                            except Exception as e:
-                                print(f"[-] Ошибка в обработчике: {e}")
-                        return handler
-
-                    # Добавляем обработчик для этого клиента
-                    create_handler(client)
-                    
                 except Exception as e:
-                    print(f"   ❌ Ошибка настройки аккаунта: {e}")
-            
-            print("\n" + "=" * 60)
-            
-            # Подсчитываем итоговую статистику
-            total_listeners = 0
-            active_accounts = 0
-            inactive_accounts = 0
-            
+                    print(f"{i}. ❌ Ошибка получения данных: {e}")
+
+                print()
+
+        elif choice == "2":
+            # Загружаем сессии для очистки кэша чатов
+            sessions = await self.session_manager.load_sessions()
+            if not sessions:
+                print("❌ Нет доступных сессий")
+                return
+
+            total_cleared = 0
+            cleared_sessions = 0
+
+            print("\n🗑️ ОЧИСТКА КЭША ЧАТОВ")
+            print("-" * 50)
+
             for client in sessions:
-                if hasattr(client, 'sent_users') and len(client.sent_users) > 0:
-                    total_listeners += len(client.sent_users)
-                    active_accounts += 1
-                else:
-                    inactive_accounts += 1
-            
-            print(f"\n📊 ИТОГОВАЯ СТАТИСТИКА ПРОСЛУШИВАНИЯ:")
-            print(f"   🟢 Активных аккаунтов (могут слушать): {active_accounts}")
-            print(f"   🔴 Неактивных аккаунтов: {inactive_accounts}")
-            print(f"   👂 Общее количество подключений для прослушивания: {total_listeners}")
-            
-            if active_accounts == 0:
-                print("   ⚠️ КРИТИЧЕСКОЕ ПРЕДУПРЕЖДЕНИЕ: НИ ОДИН АККАУНТ НЕ МОЖЕТ СЛУШАТЬ!")
-                print("   💡 Проверьте target_users.txt и права доступа аккаунтов")
-                input("   🔄 Нажмите Enter для продолжения...")
-            
-            print("\n🎧 Начинаем прослушивание ответов от целевых пользователей...")
-            print("💡 Для выхода нажмите Ctrl+C")
-
-            # Ожидаем входящие сообщения
-            try:
-                await asyncio.gather(*[client.run_until_disconnected() for client in sessions])
-            except (KeyboardInterrupt, asyncio.CancelledError):
-                print("\n📴 Получен сигнал прерывания (Ctrl+C)")
-                # Корректно отключаем всех клиентов
-                for client in sessions:
-                    try:
-                        await client.disconnect()
-                    except:
-                        pass
-                await send_shutdown_notification()
-                print("✅ Завершение режима прослушивания")
-                return  # Выходим из цикла меню корректно
-            except Exception as e:
-                print(f"❌ Ошибка в режиме прослушивания: {e}")
-                await send_shutdown_notification()
-                print("⚠️ Принудительное завершение режима прослушивания")
-
-        elif choice == "4":
-            # Создание новой сессии
-            if cfg["api_id"] and cfg["api_hash"]:
-                await create_new_session(cfg["api_id"], cfg["api_hash"])
-            else:
-                print("❌ Сначала настройте API ID и API Hash в пункте 1")
-            input("\n🔄 Нажмите Enter для продолжения...")
-
-        elif choice == "0":
-            print("📴 Завершение работы...")
-            await send_shutdown_notification()
-            print("✅ Все системы корректно остановлены")
-            break
-        else:
-            print("Неверный выбор.")
-
-
-# ---------- Доп. функции ----------
-def edit_settings(cfg):
-    print("\n=== Редактирование настроек ===")
-    proxy_types = ["socks5", "socks4", "http", "https", "mtproto"]
-
-    for key in cfg:
-        if key == "proxy_type":
-            print(f"Доступные типы прокси: {', '.join(proxy_types)}")
-            new = input(f"{key} [{cfg[key]}]: ").strip()
-            if new and new.lower() in proxy_types:
-                cfg[key] = new.lower()
-        elif key in ["delay_ms", "messages_per_account", "accounts_per_proxy", "api_id"]:
-            old = cfg[key]
-            new = input(f"{key} [{old}]: ").strip()
-            if new:
                 try:
-                    cfg[key] = int(new)
-                except ValueError:
-                    print(f"Неверное число, оставляем {old}")
-        elif key == "admin_username":
-            old = cfg[key]
-            new = input(f"{key} [{old}]: ").strip()
-            if new:
-                # Убедимся, что username начинается с @
-                if not new.startswith('@'):
-                    new = '@' + new
-                cfg[key] = new
+                    me = await client.get_me()
+                    if hasattr(client, 'chat_manager'):
+                        cleared = client.chat_manager.clear_processed_chats_cache()
+                        if cleared > 0:
+                            total_cleared += cleared
+                            cleared_sessions += 1
+                            print(f"✅ {me.first_name}: очищено {cleared} чатов")
+                        else:
+                            print(f"ℹ️ {me.first_name}: кэш пуст")
+                    else:
+                        print(f"❌ {me.first_name}: ChatManager не активирован")
+
+                except Exception as e:
+                    print(f"❌ Ошибка очистки: {e}")
+
+            print(f"\n📊 Итог: очищено {total_cleared} чатов в {cleared_sessions} сессиях")
+
+        elif choice == "3":
+            return
         else:
-            old = cfg[key]
-            new = input(f"{key} [{old}]: ").strip()
-            if new:
-                cfg[key] = new
-
-    save_config(cfg)
-    print("[+] Настройки сохранены\n")
+            print("❌ Неверный выбор")
 
 
-async def create_new_session(api_id, api_hash):
-    """🆕 Создание новой сессии по номеру телефона (принцип 20/80)"""
-    print("\n🆕 === СОЗДАНИЕ НОВОЙ СЕССИИ ===")
-    
-    # Ввод номера телефона
-    phone = input("📱 Введите номер телефона (например, +1234567890): ").strip()
-    if not phone.startswith('+'):
-        phone = '+' + phone
-    
-    # Создаем имя для сессии (используем телефон без +)
-    session_name = f"sessions/{phone[1:]}_telethon"
-    
-    print(f"📂 Сессия будет сохранена как: {session_name}.session")
-    
-    # Создаем клиент и подключаемся
-    client = TelegramClient(session_name, api_id, api_hash)
-    
+async def main():
+    """Главная функция"""
+    print("🤖 ЗАГРУЗКА MASS SENDER...")
+
+    sender = None
     try:
-        await client.connect()
-        
-        # Отправляем код
-        print(f"📤 Отправляем код на {phone}...")
-        await client.send_code_request(phone)
-        
-        # Ввод кода
-        code = input("🔐 Введите код из SMS: ").strip()
-        
-        # Авторизуемся
-        await client.sign_in(phone, code)
-        
-        # Проверяем что получилось
-        me = await client.get_me()
-        print(f"✅ Успешно! Создана сессия для: {me.first_name} ({me.phone})")
-        print(f"📁 Файл: {session_name}.session")
-        
-        await client.disconnect()
-        return True
-        
+        sender = MassSender()
+        await sender.initialize()
+        await sender.show_menu()
+
+    except KeyboardInterrupt:
+        print("\n👋 До свидания!")
     except Exception as e:
-        print(f"❌ Ошибка создания сессии: {e}")
-        
-        # Если нужно 2FA
-        if "Two steps verification" in str(e) or "password" in str(e).lower():
-            try:
-                password = input("🔑 Введите пароль двухфакторной аутентификации: ").strip()
-                await client.sign_in(password=password)
-                me = await client.get_me()
-                print(f"✅ Успешно с 2FA! Создана сессия для: {me.first_name} ({me.phone})")
-                await client.disconnect()
-                return True
-            except Exception as e2:
-                print(f"❌ Ошибка с паролем 2FA: {e2}")
-        
-        await client.disconnect()
-        return False
-
-
-def show_proxy_info(proxies):
-    if not proxies:
-        print("[!] Прокси не найдены")
-        return
-    print("\n=== Информация о прокси ===")
-    for i, proxy in enumerate(proxies, 1):
-        proxy_type, host, port, user, pwd = proxy
-        auth_info = f" (auth: {user}:{pwd})" if user and pwd else " (без авторизации)"
-        print(f"{i}. {proxy_type}://{host}:{port}{auth_info}")
-
-
-async def run_main_with_cleanup():
-    """🎯 Главная функция с корректной обработкой завершения"""
-    try:
-        await main()
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        # Эти исключения уже обработаны в main(), просто завершаемся тихо
-        pass
-    except Exception as e:
-        print(f"\n🔴 Критическая ошибка программы: {e}")
-        await send_shutdown_notification()
+        print(f"❌ Критическая ошибка: {e}")
+        if notification_bot:
+            await notification_bot.send_security_notification(
+                {"phone": "System", "name": "MassSender"},
+                {"name": "Error", "username": "system"},
+                f"Критическая ошибка: {e}",
+                "🚨 СИСТЕМНАЯ ОШИБКА"
+            )
     finally:
-        print("👋 До свидания!")
+        if sender:
+            await sender.shutdown()
 
 if __name__ == "__main__":
-    asyncio.run(run_main_with_cleanup())
+    asyncio.run(main())
