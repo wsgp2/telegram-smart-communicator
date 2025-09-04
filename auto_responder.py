@@ -636,12 +636,24 @@ class AutoResponder:
             )
             answer = response.choices[0].message.content.strip()
             logger.info(f"AI response received: {answer[:50]}...")
+            
+            # 🔧 ИСПРАВЛЕНИЕ: Добавляем ответ AI в историю для сохранения контекста
+            if context:
+                context.message_history.append(f"[AI]: {answer}")
+                logger.debug(f"AI ответ добавлен в историю. Всего сообщений: {len(context.message_history)}")
+            
             return answer
             
         except Exception as e:
             error_msg = f"Ошибка генерации AI ответа: {e}"
             logger.error(error_msg)
-            return self._get_fallback_response(context)
+            fallback_response = self._get_fallback_response(context)
+            
+            # 🔧 ИСПРАВЛЕНИЕ: Добавляем fallback ответ в историю
+            if context:
+                context.message_history.append(f"[AI]: {fallback_response}")
+            
+            return fallback_response
 
     def _get_fallback_response(self, context: ConversationContext) -> str:
         """Запасные ответы когда AI недоступен"""

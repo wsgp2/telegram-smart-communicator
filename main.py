@@ -19,6 +19,8 @@ from phone_converter import PhoneConverter
 from proxy_manager import ProxyManager
 from telethon import events
 from telethon.errors import FloodWaitError, RPCError, TypeNotFoundError
+import telethon.functions.messages
+import telethon.types
 
 
 class AutoMassSender:
@@ -538,6 +540,17 @@ class AutoMassSender:
             )
 
             if response:
+                # 🔧 ИСПРАВЛЕНИЕ: Добавляем индикатор "печатает..." для реалистичности
+                try:
+                    await client.send_read_acknowledge(sender.id)  # Отмечаем как прочитанное
+                    await client(telethon.functions.messages.SetTypingRequest(
+                        peer=sender.id, 
+                        action=telethon.types.SendMessageTypingAction()
+                    ))
+                    await asyncio.sleep(1.5)  # Имитируем время набора текста
+                except:
+                    pass  # Игнорируем ошибки typing action
+                
                 await client.send_message(sender.id, response)
                 print(f"🤖 Автоответ -> {sender.first_name}: {response[:50]}...")
 
