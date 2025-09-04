@@ -367,20 +367,42 @@ class AutoMassSender:
 
         print(f"📊 Сообщений на аккаунт: {distribution.get('actual_per_account')}")
 
-        session_messages = {}
-        working_sessions = []
-
-        for client in self.active_sessions:
+        # 🔧 ИСПРАВЛЕНИЕ: Генерируем сообщения под количество пользователей, а не сессий
+        print(f"📝 Генерируем {len(available_users)} уникальных AI сообщений...")
+        unique_messages = []
+        for i in range(len(available_users)):
             try:
-                me = await asyncio.wait_for(client.get_me(), timeout=10)
-                session_messages[client] = await self.get_smart_message()
-                print(f"💬 {me.first_name}: {session_messages[client][:50]}...")
-                working_sessions.append(client)
+                message = await self.get_smart_message()
+                unique_messages.append(message)
+                print(f"🤖 AI сгенерировал #{i+1}: {message[:50]}...")
             except Exception as e:
                 if "AI генерация сообщений недоступна" in str(e) or "AI автоответчик не активен" in str(e):
                     print(f"🛑 {str(e)}")
                     print("🛡️ Рассылка остановлена для защиты от банов!")
                     return 0
+                print(f"❌ Ошибка генерации сообщения #{i+1}: {e}")
+                # Используем fallback сообщение
+                unique_messages.append(self.get_random_message())
+
+        # Проверяем что есть сообщения для отправки
+        if not unique_messages:
+            print("❌ Не удалось сгенерировать ни одного сообщения")
+            return 0
+
+        session_messages = {}
+        working_sessions = []
+
+        # Проверяем сессии и назначаем им сообщения циклично
+        message_index = 0
+        for client in self.active_sessions:
+            try:
+                me = await asyncio.wait_for(client.get_me(), timeout=10)
+                # Циклично назначаем сообщения (если сессий больше чем сообщений)
+                session_messages[client] = unique_messages[message_index % len(unique_messages)]
+                print(f"💬 {me.first_name}: использует сообщение #{(message_index % len(unique_messages)) + 1}")
+                working_sessions.append(client)
+                message_index += 1
+            except Exception as e:
                 print(f"❌ Сессия не отвечает: {e}")
                 await self.move_broken_session(client, "send_check_failed")
 
