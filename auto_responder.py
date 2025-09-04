@@ -181,6 +181,11 @@ CAR_INTEREST_PROMPTS = {
 • Извлекай марки авто из любых формулировок (включая "уебанскую", "крутую" и т.д.)
 • Понимай бюджет в любой форме (рублях, тысячах, миллионах)
 
+ЗАВЕРШЕНИЕ ДИАЛОГА:
+• Если уже получил И МАРКУ И БЮДЖЕТ - обязательно скажи "Спасибо за информацию! Передам данные менеджеру, он свяжется с вами в ближайшее время"
+• После этого НЕ задавай больше вопросов о других деталях
+• Фокусируйся только на марке и бюджете, остальное не важно
+
 ОТВЕТ ДОЛЖЕН БЫТЬ естественным продолжением диалога, а не шаблонным.
     """,
 
@@ -729,19 +734,33 @@ class AutoResponder:
         # Обновляем счетчики
         self.stats['questions_asked'] += 1
 
+        # 🔧 ИСПРАВЛЕНИЕ: Если есть марка И бюджет - автоматически считаем заинтересованным
+        if context.brand and context.budget and context.interested is None:
+            context.interested = True
+            logger.info(f"🎯 Автоматически установлен интерес=True (есть марка и бюджет)")
+
         # Проверяем условия завершения диалога
         has_both_info = context.brand and context.budget and context.interested
         reached_max_questions = context.questions_asked >= self.config.max_questions
         not_interested = context.interested is False
 
+        # 🔧 ОТЛАДКА: Детальное логирование проверки завершения
+        logger.info(f"Проверка завершения диалога пользователя {user_id}:")
+        logger.info(f"  - Марка: {context.brand}")
+        logger.info(f"  - Бюджет: {context.budget}")
+        logger.info(f"  - Интерес: {context.interested}")
+        logger.info(f"  - Вопросов задано: {context.questions_asked}/{self.config.max_questions}")
+        logger.info(f"  - has_both_info: {has_both_info}")
+
         if has_both_info or reached_max_questions or not_interested:
             context.status = "completed"
+            logger.info(f"🎯 ДИАЛОГ ЗАВЕРШЕН! Причина: has_both_info={has_both_info}, max_questions={reached_max_questions}, not_interested={not_interested}")
             
             # Отправляем уведомление менеджерам если есть полная информация
             if has_both_info:
                 self.stats['leads_completed'] += 1
                 await self._send_lead_notification(context)
-                logger.info(f"Лид завершен: {context.brand}, {context.budget}")
+                logger.info(f"✅ Лид завершен: {context.brand}, {context.budget}")
             
             # AI генерирует финальный ответ
             response = await self.generate_ai_response(context, message)
