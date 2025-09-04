@@ -40,9 +40,14 @@ class ListenerConsole:
                 user_manager = UserManager()
                 users_data = await user_manager.load_all_users()
                 processed_users = users_data.get("processed", [])
+                target_users = users_data.get("target", [])
+
+                # 🔧 ИСПРАВЛЕНИЕ: Добавляем И processed И target пользователей для прослушки  
+                all_users_to_listen = set(processed_users + target_users)
+                print(f"📡 Настройка прослушки: {len(processed_users)} processed + {len(target_users)} target = {len(all_users_to_listen)} пользователей")
 
                 # Добавляем их в кэш
-                for user in processed_users:
+                for user in all_users_to_listen:
                     try:
                         entity = await client.get_entity(user)
                         client.sent_users.add(entity.id)
