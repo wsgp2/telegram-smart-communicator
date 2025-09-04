@@ -19,8 +19,8 @@ from phone_converter import PhoneConverter
 from proxy_manager import ProxyManager
 from telethon import events
 from telethon.errors import FloodWaitError, RPCError, TypeNotFoundError
-import telethon.functions.messages
-import telethon.types
+from telethon.tl.functions.messages import SetTypingRequest
+from telethon.tl.types import SendMessageTypingAction
 
 
 class AutoMassSender:
@@ -543,9 +543,9 @@ class AutoMassSender:
                 # 🔧 ИСПРАВЛЕНИЕ: Добавляем индикатор "печатает..." для реалистичности
                 try:
                     await client.send_read_acknowledge(sender.id)  # Отмечаем как прочитанное
-                    await client(telethon.functions.messages.SetTypingRequest(
+                    await client(SetTypingRequest(
                         peer=sender.id, 
-                        action=telethon.types.SendMessageTypingAction()
+                        action=SendMessageTypingAction()
                     ))
                     await asyncio.sleep(1.5)  # Имитируем время набора текста
                 except:

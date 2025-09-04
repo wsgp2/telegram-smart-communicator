@@ -142,7 +142,7 @@ class Config:
 
 # Константы для автоответчика
 AUTO_RESPONDER_CONFIG = {
-    "max_history": 50,
+    "max_history": 30,
     "keywords_car_interest": {
         "купить", "покупка", "приобрести", "взять", "нужен автомобиль",
         "нужна машина", "ищу авто", "хочу машину", "toyota", "honda",
