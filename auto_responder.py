@@ -1,46 +1,143 @@
 #!/usr/bin/env python3
 """
 AUTO RESPONDER - Автоматический опросник покупателей автомобилей
-Оптимизированная версия для конфигурации
+Исправленная версия с поддержкой JSON конфигурации
 """
 
 import asyncio
 import re
 import os
+import json
 import logging
 from collections import deque
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Deque, Any, List
-import aiohttp
 import httpx
 from openai import AsyncOpenAI
 
 # Настройка логгера
 logger = logging.getLogger('auto_responder')
 
-
+# Путь к файлу конфигурации по умолчанию
+DEFAULT_CONFIG_PATH = "config/auto_responder_config.json"
 
 
 # ---------------- Конфигурация ---------------
 class Config:
-    def __init__(self, config_dict: Dict[str, Any]):
+    def __init__(self, config_dict: Optional[Dict[str, Any]] = None):
+        """
+        Инициализация конфигурации из словаря или JSON файла
+        """
+        # Если словарь не передан, пытаемся загрузить из файла
+        if config_dict is None:
+            config_dict = self._load_from_json()
+
         self.api_id = config_dict.get("api_id", 2040)
         self.api_hash = config_dict.get("api_hash", "")
         self.auto_responder_enabled = config_dict.get("auto_responder", {}).get("enabled", True)
         self.max_questions = config_dict.get("auto_responder", {}).get("max_questions", 3)
         self.response_timeout_hours = config_dict.get("auto_responder", {}).get("response_timeout_hours", 24)
-        
+
         # AI Configuration
         ai_config = config_dict.get("auto_responder", {}).get("ai", {})
         self.ai_enabled = ai_config.get("enabled", False)
         self.ai_api_key = ai_config.get("api_key", "")
-        self.ai_model = ai_config.get("model", "gpt-4o-mini")  # Исправлено имя модели
+        self.ai_model = ai_config.get("model", "gpt-4.1")
         self.ai_max_tokens = ai_config.get("max_tokens", 150)
-        
+
         # Proxy Configuration
         ai_proxy = ai_config.get("proxy", {})
         self.ai_proxy_enabled = ai_proxy.get("enabled", False)
         self.ai_proxy_url = ai_proxy.get("url", "")
+
+    def _load_from_json(self) -> Dict[str, Any]:
+        """
+        Загружает конфигурацию из JSON файла
+        """
+        config_paths = [
+            DEFAULT_CONFIG_PATH,
+            "config.json",
+            "data/config.json",
+            "../config/auto_responder_config.json",
+            "../config.json"
+        ]
+
+        for path in config_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        config_data = json.load(f)
+                        logger.info(f"Configuration loaded from: {path}")
+                        return config_data
+                except Exception as e:
+                    logger.error(f"Error loading config from {path}: {e}")
+                    continue
+
+        logger.warning("No configuration file found, using defaults")
+        return self._get_default_config()
+
+    def _get_default_config(self) -> Dict[str, Any]:
+        """
+        Возвращает конфигурацию по умолчанию
+        """
+        return {
+            "api_id": 2040,
+            "api_hash": "",
+            "auto_responder": {
+                "enabled": True,
+                "max_questions": 3,
+                "response_timeout_hours": 24,
+                "ai": {
+                    "enabled": True,
+                    "api_key": "",
+                    "model": "gpt-4.1",
+                    "max_tokens": 150,
+                    "proxy": {
+                        "enabled": True,
+                        "url": ""
+                    }
+                }
+            }
+        }
+
+    def save_to_json(self, path: Optional[str] = None):
+        """
+        Сохраняет текущую конфигурацию в JSON файл
+        """
+        if path is None:
+            path = DEFAULT_CONFIG_PATH
+
+        # Создаем директорию если не существует
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        config_dict = {
+            "api_id": self.api_id,
+            "api_hash": self.api_hash,
+            "auto_responder": {
+                "enabled": self.auto_responder_enabled,
+                "max_questions": self.max_questions,
+                "response_timeout_hours": self.response_timeout_hours,
+                "ai": {
+                    "enabled": self.ai_enabled,
+                    "api_key": self.ai_api_key,
+                    "model": self.ai_model,
+                    "max_tokens": self.ai_max_tokens,
+                    "proxy": {
+                        "enabled": self.ai_proxy_enabled,
+                        "url": self.ai_proxy_url
+                    }
+                }
+            }
+        }
+
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(config_dict, f, ensure_ascii=False, indent=4)
+            logger.info(f"Configuration saved to: {path}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving config to {path}: {e}")
+            return False
 
 
 # Константы для автоответчика
@@ -56,7 +153,7 @@ AUTO_RESPONDER_CONFIG = {
         "кабриолет", "минивэн", "автомат", "механика", "полный привод",
         "передний привод", "бензин", "дизель", "гибрид", "электро",
         "рублей", "тысяч", "миллион", "бюджет", "цена", "стоимость",
-        "дешевый", "дорогой", "недорого", "до", "от", "в пределах"
+        "дешевый", "дорогой", "недорого", "до", "от", "в пределах", "бмв",
     },
     "phone_regex": re.compile(r"(?:\+7|8)?\s*\(?(\d{3})\)?[\s-]?(\d{3})[\s-]?(\d{2})[\s-]?(\d{2})"),
 }
@@ -124,17 +221,17 @@ class ConversationContext:
 
 # ---------------- Автоответчик ----------------
 class AutoResponder:
-    def __init__(self, config: Config):
+    def __init__(self, config: Optional[Config] = None):
         """Инициализация автоответчика"""
-        self.config = config
+        self.config = config if config else Config()
         self.conversations: Dict[str, ConversationContext] = {}
         self.lock = asyncio.Lock()
         self.client = None
-        self.enabled = False
-        self.ai_enabled = False
-        self.max_questions = config.max_questions
+        self.enabled = True
+        self.ai_enabled = True
+        self.max_questions = self.config.max_questions
         self.session_manager = None
-        
+
         # Статистика
         self.stats = {
             'conversations_started': 0,
@@ -143,55 +240,87 @@ class AutoResponder:
             'cars_identified': 0,
             'budgets_collected': 0
         }
-        
-        # Инициализируем OpenAI клиент
+
+        self.initialization_log = []
+
         self._init_openai_client()
 
     def _init_openai_client(self):
-        """Инициализация OpenAI клиента с обработкой ошибок"""
-        if not self.config.ai_enabled or not self.config.ai_api_key:
-            logger.warning("AI disabled or no API key provided")
+        self.initialization_log.append("Начало инициализации OpenAI клиента")
+
+        if not self.config.ai_enabled:
+            self.initialization_log.append("❌ AI отключен в конфигурации (ai.enabled = False)")
+            logger.warning("AI disabled in configuration")
             return
-            
+
+        if not self.config.ai_api_key:
+            self.initialization_log.append("❌ API ключ не предоставлен")
+            logger.warning("AI API key not provided")
+            return
+
         try:
             # Проверяем валидность API ключа
-            if self.config.ai_api_key.startswith("sk-") and len(self.config.ai_api_key) > 20:
-                client_kwargs = {"api_key": self.config.ai_api_key}
-                
-                # Настройка прокси если включена
-                if self.config.ai_proxy_enabled and self.config.ai_proxy_url:
-                    try:
-                        proxy_url = self._parse_proxy_url(self.config.ai_proxy_url)
-                        client_kwargs["http_client"] = httpx.AsyncClient(
-                            proxies={"all://": proxy_url},
-                            timeout=30.0,
-                            verify=False  # Для прокси может потребоваться
-                        )
-                        logger.info(f"Using proxy for OpenAI: {proxy_url}")
-                    except Exception as e:
-                        logger.error(f"Failed to setup proxy: {e}")
-                        # Создаем клиент без прокси
-                        client_kwargs["http_client"] = httpx.AsyncClient(timeout=30.0)
-                
-                self.client = AsyncOpenAI(**client_kwargs)
-                logger.info("OpenAI client initialized successfully")
-            else:
+            if not self.config.ai_api_key.startswith("sk-"):
+                self.initialization_log.append(
+                    f"❌ Неверный формат API ключа: начинается с '{self.config.ai_api_key[:5]}...'")
                 logger.error("Invalid OpenAI API key format")
-                
+                return
+
+            if len(self.config.ai_api_key) < 20:
+                self.initialization_log.append(f"❌ API ключ слишком короткий: {len(self.config.ai_api_key)} символов")
+                logger.error("API key too short")
+                return
+
+            self.initialization_log.append(f"✅ API ключ корректного формата: {self.config.ai_api_key[:10]}...")
+            self.initialization_log.append(f"🔧 Модель: {self.config.ai_model}")
+
+            # Базовые параметры клиента
+            client_kwargs = {"api_key": self.config.ai_api_key}
+
+            # Настройка прокси если включена
+            if self.config.ai_proxy_enabled and self.config.ai_proxy_url:
+                try:
+                    proxy_url = self._parse_proxy_url(self.config.ai_proxy_url)
+
+                    # Устанавливаем переменную окружения для прокси
+                    import os
+                    os.environ['HTTP_PROXY'] = proxy_url
+                    os.environ['HTTPS_PROXY'] = proxy_url
+
+                    self.initialization_log.append(f"🌐 Используется прокси: {proxy_url}")
+                    logger.info(f"Using proxy for OpenAI: {proxy_url}")
+
+                except Exception as e:
+                    self.initialization_log.append(f"⚠️ Ошибка настройки прокси: {e}")
+                    logger.error(f"Failed to setup proxy: {e}")
+
+            self.client = AsyncOpenAI(**client_kwargs)
+            self.initialization_log.append("✅ OpenAI клиент создан")
+            logger.info("OpenAI client initialized successfully")
+
         except Exception as e:
-            logger.error(f"Failed to initialize OpenAI client: {e}")
+            error_msg = f"Ошибка создания OpenAI клиента: {e}"
+            self.initialization_log.append(f"❌ {error_msg}")
+            logger.error(error_msg)
             self.client = None
-        
-        # Обновляем состояние после инициализации OpenAI
+
         self.enabled = self.config.auto_responder_enabled
         self.ai_enabled = self.config.ai_enabled and self.client is not None
+
+        if self.ai_enabled:
+            self.initialization_log.append("✅ AI автоответчик полностью активен")
+        else:
+            self.initialization_log.append("❌ AI автоответчик неактивен - будут использоваться fallback ответы")
+    def get_initialization_log(self) -> List[str]:
+        """Возвращает лог инициализации для диагностики"""
+        return self.initialization_log.copy()
 
     def _parse_proxy_url(self, proxy_url: str) -> str:
         """Парсинг и форматирование URL прокси"""
         if not proxy_url.startswith(("http://", "https://", "socks5://")):
             proxy_url = "http://" + proxy_url
         return proxy_url
-        
+
     def set_session_manager(self, session_manager):
         """Установка менеджера сессий для отправки сообщений"""
         self.session_manager = session_manager
@@ -206,7 +335,10 @@ class AutoResponder:
         if not message:
             return False
 
-        message_lower = message.lower()
+        text = re.sub(r"\s+", " ", message_lower.replace(',', '.')).strip()
+        for pattern in budget_patterns:
+        	matches = re.findall(pattern, text)
+
         return any(keyword.lower() in message_lower for keyword in AUTO_RESPONDER_CONFIG["keywords_car_interest"])
 
     def is_positive_response(self, message: str) -> bool:
@@ -226,12 +358,14 @@ class AutoResponder:
     async def generate_ai_response(self, context: ConversationContext, user_message: str) -> str:
         """Генерирует AI ответ с использованием промтов"""
         if not self.ai_enabled:
+            logger.warning("AI not enabled, using fallback response")
             return self._get_fallback_response(context)
 
-        context.message_history.append(user_message)
+        if context:
+            context.message_history.append(user_message)
 
         # Определяем стадию разговора
-        if context.questions_asked == 0:
+        if not context or context.questions_asked == 0:
             system_prompt = CAR_INTEREST_PROMPTS["initial"]
         elif not context.interested:
             if self.is_positive_response(user_message):
@@ -247,6 +381,7 @@ class AutoResponder:
             system_prompt = CAR_INTEREST_PROMPTS["completion"]
 
         try:
+            logger.info(f"Making OpenAI request with model: {self.config.ai_model}")
             response = await self.client.chat.completions.create(
                 model=self.config.ai_model,
                 messages=[
@@ -256,13 +391,16 @@ class AutoResponder:
                 max_tokens=self.config.ai_max_tokens,
             )
             answer = response.choices[0].message.content.strip()
+            logger.info(f"AI response received: {answer[:50]}...")
             return answer
         except Exception as e:
+            error_msg = f"Ошибка генерации AI ответа: {e}"
+            logger.error(error_msg)
             return self._get_fallback_response(context)
 
     def _get_fallback_response(self, context: ConversationContext) -> str:
         """Запасные ответы когда AI недоступен"""
-        if context.questions_asked == 0:
+        if not context or context.questions_asked == 0:
             return "Здравствуйте! Вижу вы интересуетесь покупкой автомобиля. Это актуально для вас?"
         elif not context.interested:
             return "Хорошо, если понадобится помощь с выбором автомобиля - обращайтесь!"
@@ -329,10 +467,8 @@ class AutoResponder:
                     self.stats['budgets_collected'] += 1
                     break
 
-            # Дополнительная проверка для явного указания бюджета
             if not context.budget and any(
                     word in message_lower for word in ['бюджет', 'цена', 'стоимость', 'рублей', 'тысяч', 'миллион']):
-                # Если явно говорится о бюджете, но не распознан формат, сохраняем весь текст
                 context.budget = message.strip()
                 self.stats['budgets_collected'] += 1
 
@@ -340,6 +476,7 @@ class AutoResponder:
                              username: Optional[str] = None, first_name: Optional[str] = None) -> Optional[str]:
         """Основной метод обработки сообщений"""
         if not self.enabled:
+            logger.debug("AutoResponder disabled")
             return None
 
         async with self.lock:
@@ -355,15 +492,14 @@ class AutoResponder:
         if context.status == "completed":
             return None
 
-        if context.questions_asked == 0 and not self.is_car_interest(message):
-            return None
 
-        if context.questions_asked == 0:
-            self.stats['conversations_started'] += 1
+        context.questions_asked += 1
+        self.stats['questions_asked'] += 1
+
 
         self.analyze_response(context, message)
 
-        if context.questions_asked > 0:  
+        if context.questions_asked > 0:
             context.questions_asked += 1
             self.stats['questions_asked'] += 1
 
@@ -473,6 +609,8 @@ class AutoResponder:
             'leads_completed': self.stats['leads_completed'],
             'cars_identified': self.stats['cars_identified'],
             'budgets_collected': self.stats['budgets_collected'],
+            'ai_enabled': self.ai_enabled,
+            'initialization_log': self.get_initialization_log()
         }
 
 
@@ -480,15 +618,57 @@ class AutoResponder:
 auto_responder_instance: Optional[AutoResponder] = None
 
 
-def init_auto_responder(config_dict: dict, session_manager=None):
+def init_auto_responder(config_dict: Optional[dict] = None, session_manager=None):
+    """
+    Инициализация автоответчика
+
+    Args:
+        config_dict: Словарь с конфигурацией (опционально)
+        session_manager: Менеджер сессий для отправки сообщений
+    """
     global auto_responder_instance
-    config = Config(config_dict)
-    
+
+    if config_dict:
+        config = Config(config_dict)
+    else:
+        config = Config()
+
     auto_responder_instance = AutoResponder(config)
+
     if session_manager:
         auto_responder_instance.set_session_manager(session_manager)
-    asyncio.create_task(auto_responder_instance.cleanup_sessions())
+
+    try:
+        asyncio.create_task(auto_responder_instance.cleanup_sessions())
+    except RuntimeError:
+        pass
+
+    return auto_responder_instance
 
 
 def get_auto_responder() -> Optional[AutoResponder]:
     return auto_responder_instance
+
+
+def create_default_config_file(path: Optional[str] = None):
+    if path is None:
+        path = DEFAULT_CONFIG_PATH
+
+    config = Config()
+    config.save_to_json(path)
+    print(f"✅ Создан файл конфигурации: {path}")
+
+
+if __name__ == "__main__":
+    if not os.path.exists(DEFAULT_CONFIG_PATH):
+        create_default_config_file()
+
+    responder = init_auto_responder()
+
+    if responder:
+        stats = responder.get_stats()
+        print("\n📊 Статус автоответчика:")
+        print(f"   AI включен: {stats['ai_enabled']}")
+        print("\n📋 Лог инициализации:")
+        for log_entry in stats['initialization_log']:
+            print(f"   {log_entry}")
