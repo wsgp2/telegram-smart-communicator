@@ -614,9 +614,11 @@ class AutoResponder:
                 
                 for i, msg in enumerate(history_to_include):
                     role = "user" if i % 2 == 0 else "assistant"
+                    # 🔧 ИСПРАВЛЕНИЕ: Убираем префикс [AI]: из сообщений для AI
+                    clean_msg = msg.replace("[AI]: ", "") if msg.startswith("[AI]: ") else msg
                     conversation_messages.append({
                         "role": role,
-                        "content": msg
+                        "content": clean_msg
                     })
             
             # Добавляем текущее сообщение пользователя (если его еще нет)
