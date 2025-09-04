@@ -113,7 +113,7 @@ class AutoMassSender:
                     print(f"❌ RPC ошибка в сессии: {e}")
                     await self.move_broken_session(client, "rpc_error")
 
-                    except Exception as e:
+            except Exception as e:
                 print(f"❌ Общая ошибка в сессии: {e}")
                 await self.move_broken_session(client, "general_error")
 
@@ -168,9 +168,9 @@ class AutoMassSender:
                     except Exception as copy_error:
                         print(f"⚠️ Не удалось скопировать сессию: {copy_error}")
 
-    else:
+            else:
                 print("⚠️ Не удалось найти файл сессии для перемещения")
-
+        
         except Exception as e:
             print(f"❌ Ошибка при обработке битой сессии: {e}")
 
@@ -196,8 +196,8 @@ class AutoMassSender:
                 self.messages_list = ["Привет! Как дела?"]
 
             print(f"📝 Загружено {len(self.messages_list)} сообщений")
-        
-    except Exception as e:
+                        
+        except Exception as e:
             print(f"❌ Ошибка загрузки сообщений: {e}")
             self.messages_list = ["Привет! Как дела?"]
 
@@ -220,7 +220,7 @@ class AutoMassSender:
             ai_message = await self.auto_responder.generate_initial_message()
             print(f"🤖 AI сгенерировал: {ai_message}")
             return ai_message
-            
+        
         except Exception as e:
             print(f"❌ КРИТИЧЕСКАЯ ОШИБКА AI генерации: {e}")
             raise Exception(f"❌ AI генерация сообщений недоступна - рассылка остановлена! Ошибка: {e}")
@@ -241,10 +241,10 @@ class AutoMassSender:
                 print("\n📋 Лог инициализации автоответчика:")
                 for log_entry in stats.get('initialization_log', []):
                     print(f"   {log_entry}")
-                                else:
+            else:
                 print("❌ AI автоответчик не активен")
-                        
-                except Exception as e:
+
+        except Exception as e:
             print(f"❌ Ошибка инициализации автоответчика: {e}")
             import traceback
             traceback.print_exc()
@@ -422,14 +422,14 @@ class AutoMassSender:
                 for user in processed_users:
                     try:
                         entity = await asyncio.wait_for(client.get_entity(user), timeout=10)
-                    client.sent_users.add(entity.id)
+                        client.sent_users.add(entity.id)
                     except Exception:
                         continue
-
+            
                 me = await client.get_me()
                 print(f"✅ {me.first_name}: отслеживает {len(client.sent_users)} пользователей")
 
-                except Exception as e:
+            except Exception as e:
                 print(f"❌ Ошибка настройки проверки: {e}")
 
     async def setup_message_listeners(self):
@@ -450,7 +450,7 @@ class AutoMassSender:
                     async def handler(event):
                         try:
                             await self.handle_incoming_message(current_client, event)
-        except Exception as e:
+                        except Exception as e:
                             if self.is_known_error(e):
                                 print(f"⚠️ Известная ошибка в обработчике: {e}")
                             else:
@@ -475,9 +475,6 @@ class AutoMassSender:
                     sessions_to_remove.append(client)
                 else:
                     print(f"❌ Ошибка настройки прослушки: {e}")
-
-            except Exception as e:
-                print(f"❌ Ошибка настройки прослушки: {e}")
 
         # Удаляем битые сессии после цикла
         for client in sessions_to_remove:
@@ -512,8 +509,8 @@ class AutoMassSender:
             # Удаляем сообщение из чата
             try:
                 await event.message.delete(revoke=False)
-                    except:
-                        pass
+            except:
+                pass
 
         except (TypeNotFoundError, RPCError) as e:
             if self.is_known_error(e):
@@ -586,7 +583,7 @@ class AutoMassSender:
             except KeyboardInterrupt:
                 print("\n🛑 Получен сигнал остановки")
                 break
-                                        except Exception as e:
+            except Exception as e:
                 print(f"❌ Ошибка в основном цикле: {e}")
                 import traceback
                 traceback.print_exc()
@@ -630,10 +627,10 @@ class AutoMassSender:
                             client.remove_event_handler(handler)
                         except:
                             pass
-
-                        await client.disconnect()
-                    except:
-                        pass
+        
+                await client.disconnect()
+            except:
+                pass
 
         if notification_bot:
             try:
@@ -686,7 +683,7 @@ async def main():
                     shutil.rmtree(broken_dir)
                     os.makedirs(broken_dir, exist_ok=True)
                     print("🧹 Папка broken_sessions очищена")
-    except Exception as e:
+                except Exception as e:
                     print(f"❌ Ошибка очистки: {e}")
             else:
                 print("⚠️ Папка broken_sessions не существует")

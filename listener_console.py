@@ -124,7 +124,7 @@ class ListenerConsole:
                     account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
                     sender_info = {'name': sender.first_name or 'Unknown', 'username': sender.username or 'No username'}
                     asyncio.create_task(notification_bot.send_notification(
-                        account_info, sender_info, f"🤖 Автоответ: {response}", is_auto_response=True
+                        account_info, sender_info, f"🤖 Автоответ: {response}"
                     ))
         except Exception as e:
             print(f"❌ Ошибка автоответчика: {e}")
