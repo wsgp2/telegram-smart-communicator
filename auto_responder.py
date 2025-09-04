@@ -160,44 +160,73 @@ AUTO_RESPONDER_CONFIG = {
 
 # ---------------- Промты для AI ----------------
 CAR_INTEREST_PROMPTS = {
-    "initial": """
-    Ты консультант по продаже автомобилей. 
-    Клиент ранее проявил интерес к покупке авто.
+    "conversation": """
+Ты профессиональный консультант по продаже автомобилей. Веди естественный диалог с потенциальным покупателем.
 
-    Твоя задача - деликатно выяснить:
-    1. Действительно ли интерес актуален
-    2. Какую марку/модель рассматривает
-    3. Какой бюджет планирует
+ТВОЯ ЦЕЛЬ: Вежливо и деликатно выяснить:
+1. Действительно ли клиент заинтересован в покупке автомобиля
+2. Какую марку/модель рассматривает (любые варианты, включая сленг)
+3. Планируемый бюджет покупки
 
-    Будь дружелюбным и профессиональным.
-    Не навязывайся, если клиент не заинтересован.
-    Отвечай кратко - 1-2 предложения максимум.
+ПРАВИЛА ОБЩЕНИЯ:
+• Будь дружелюбным и профессиональным
+• Отвечай естественно, как живой человек
+• Не навязывайся, если клиент не заинтересован
+• Отвечай кратко - 1-2 предложения
+• Если клиент пишет неприлично - отвечай с юмором, но профессионально
+• Понимай сленг и разговорную речь
+
+АНАЛИЗ СООБЩЕНИЙ:
+• Определяй интерес к покупке из контекста
+• Извлекай марки авто из любых формулировок (включая "уебанскую", "крутую" и т.д.)
+• Понимай бюджет в любой форме (рублях, тысячах, миллионах)
+
+ОТВЕТ ДОЛЖЕН БЫТЬ естественным продолжением диалога, а не шаблонным.
     """,
 
-    "brand": """
-    Клиент подтвердил интерес к покупке автомобиля.
-    Теперь нужно узнать предпочтения по марке/модели.
+    "interest_analysis": """
+Проанализируй сообщение клиента и определи его интерес к покупке автомобиля.
 
-    Задай вопрос о том, какую марку или модель он рассматривает.
-    Можешь упомянуть популярные варианты для подсказки.
-    Будь кратким - 1 предложение.
+ПРИЗНАКИ ИНТЕРЕСА:
+- Слова: "хочу", "интересует", "нужно", "планирую", "рассматриваю", "покупка", "купить"
+- Положительные ответы: "да", "конечно", "ага", "угу", "yes"
+- Вопросы о машинах, марках, ценах
+- Упоминание конкретных марок
+- Любое обсуждение параметров авто
+
+НЕТ ИНТЕРЕСА:
+- Четкое "нет", "не интересует", "не нужно", "не планирую"
+- Отказ от продолжения диалога
+
+ПРИ СОМНЕНИЯХ - считай ЗАИНТЕРЕСОВАН.
+
+ОТВЕТЬ ТОЛЬКО: "ЗАИНТЕРЕСОВАН" или "НЕ ЗАИНТЕРЕСОВАН"
     """,
 
-    "budget": """
-    Клиент назвал интересующую марку авто.
-    Теперь нужно деликатно выяснить бюджет.
+    "brand_extraction": """
+Извлеки марку автомобиля из сообщения клиента.
 
-    Задай вопрос о планируемом бюджете или ценовом диапазоне.
-    Будь тактичным и не давящим.
-    1 предложение максимум.
+ИЩИ:
+- Названия марок (Toyota, BMW, Mercedes, Lada и т.д.)
+- Сленговые названия ("бэха" = BMW, "мерс" = Mercedes)
+- Описания ("немецкую", "японскую", "корейскую")
+- Любые упоминания конкретных авто
+
+ЕСЛИ МАРКА НАЙДЕНА - ответь только названием марки.
+ЕСЛИ НЕ НАЙДЕНА - ответь "НЕТ"
     """,
 
-    "completion": """
-    Клиент предоставил всю необходимую информацию о покупке автомобиля.
-    Поблагодари его за предоставленные данные и сообщи, что менеджер скоро свяжется для консультации.
+    "budget_extraction": """
+Извлеки бюджет покупки из сообщения клиента.
 
-    Будь благодарным и профессиональным. Не задавай больше вопросов.
-    1-2 предложения.
+ИЩИ:
+- Суммы в рублях, тысячах, миллионах
+- Диапазоны ("от 500 до 1000 тысяч")
+- Приблизительные суммы ("около миллиона")
+- Любые денежные ограничения
+
+ЕСЛИ БЮДЖЕТ НАЙДЕН - ответь суммой в понятном формате.
+ЕСЛИ НЕ НАЙДЕН - ответь "НЕТ"
     """
 }
 
@@ -215,7 +244,7 @@ class ConversationContext:
         self.status: str = "active"
         self.username: Optional[str] = None
         self.first_name: Optional[str] = None
-        self.interested: bool = False
+        self.interested: Optional[bool] = None
         self.config = config
 
 
@@ -331,14 +360,11 @@ class AutoResponder:
         return self.conversations[user_id]
 
     def is_car_interest(self, message: str) -> bool:
-        """Проверяет, содержит ли сообщение интерес к автомобилям"""
+        """Проверяет, содержит ли сообщение интерес к автомобилям (fallback метод)"""
         if not message:
             return False
 
-        text = re.sub(r"\s+", " ", message_lower.replace(',', '.')).strip()
-        for pattern in budget_patterns:
-        	matches = re.findall(pattern, text)
-
+        message_lower = message.lower()
         return any(keyword.lower() in message_lower for keyword in AUTO_RESPONDER_CONFIG["keywords_car_interest"])
 
     def is_positive_response(self, message: str) -> bool:
@@ -355,8 +381,135 @@ class AutoResponder:
 
         return positive_count > negative_count
 
+    async def ai_analyze_interest(self, message: str, conversation_history: List[str]) -> bool:
+        """AI анализ интереса к покупке автомобиля"""
+        if not self.ai_enabled:
+            return self.is_positive_response(message)
+        
+        try:
+            # Формируем контекст из истории
+            # Конвертируем deque в список для слайсинга
+            history_list = list(conversation_history) if conversation_history else []
+            history_context = "\n".join(history_list[-5:]) if history_list else ""
+            full_context = f"История диалога:\n{history_context}\n\nПоследнее сообщение: {message}"
+            
+            response = await self.client.chat.completions.create(
+                model=self.config.ai_model,
+                messages=[
+                    {"role": "system", "content": CAR_INTEREST_PROMPTS["interest_analysis"]},
+                    {"role": "user", "content": full_context}
+                ],
+                max_tokens=10,
+                temperature=0.1
+            )
+            
+            result = response.choices[0].message.content.strip().upper()
+            logger.info(f"AI анализ интереса вернул: '{result}'")
+            return "ЗАИНТЕРЕСОВАН" in result
+            
+        except Exception as e:
+            logger.error(f"Ошибка AI анализа интереса: {e}")
+            return self.is_positive_response(message)
+
+    async def ai_extract_brand(self, message: str, conversation_history: List[str]) -> Optional[str]:
+        """AI извлечение марки автомобиля"""
+        if not self.ai_enabled:
+            return self._extract_brand_keywords(message)
+        
+        try:
+            # Формируем контекст из истории
+            # Конвертируем deque в список для слайсинга
+            history_list = list(conversation_history) if conversation_history else []
+            history_context = "\n".join(history_list[-5:]) if history_list else ""
+            full_context = f"История диалога:\n{history_context}\n\nПоследнее сообщение: {message}"
+            
+            response = await self.client.chat.completions.create(
+                model=self.config.ai_model,
+                messages=[
+                    {"role": "system", "content": CAR_INTEREST_PROMPTS["brand_extraction"]},
+                    {"role": "user", "content": full_context}
+                ],
+                max_tokens=20,
+                temperature=0.1
+            )
+            
+            result = response.choices[0].message.content.strip()
+            logger.info(f"AI извлечение марки вернуло: '{result}'")
+            return result if result != "НЕТ" else None
+            
+        except Exception as e:
+            logger.error(f"Ошибка AI извлечения марки: {e}")
+            return self._extract_brand_keywords(message)
+
+    async def ai_extract_budget(self, message: str, conversation_history: List[str]) -> Optional[str]:
+        """AI извлечение бюджета"""
+        if not self.ai_enabled:
+            return self._extract_budget_keywords(message)
+        
+        try:
+            # Формируем контекст из истории
+            # Конвертируем deque в список для слайсинга
+            history_list = list(conversation_history) if conversation_history else []
+            history_context = "\n".join(history_list[-5:]) if history_list else ""
+            full_context = f"История диалога:\n{history_context}\n\nПоследнее сообщение: {message}"
+            
+            response = await self.client.chat.completions.create(
+                model=self.config.ai_model,
+                messages=[
+                    {"role": "system", "content": CAR_INTEREST_PROMPTS["budget_extraction"]},
+                    {"role": "user", "content": full_context}
+                ],
+                max_tokens=30,
+                temperature=0.1
+            )
+            
+            result = response.choices[0].message.content.strip()
+            logger.info(f"AI извлечение бюджета вернуло: '{result}'")
+            return result if result != "НЕТ" else None
+            
+        except Exception as e:
+            logger.error(f"Ошибка AI извлечения бюджета: {e}")
+            return self._extract_budget_keywords(message)
+
+    def _extract_brand_keywords(self, message: str) -> Optional[str]:
+        """Fallback извлечение марки по ключевым словам"""
+        message_lower = message.lower()
+        brands = ["toyota", "honda", "bmw", "mercedes", "audi", "volkswagen",
+                  "kia", "hyundai", "nissan", "mazda", "subaru", "lexus",
+                  "lada", "renault", "peugeot", "ford", "chevrolet", "skoda",
+                  "тойота", "хонда", "бмв", "мерседес", "ауди", "фольксваген",
+                  "киа", "хендай", "ниссан", "мазда", "субару", "лексус",
+                  "лада", "рено", "пежо", "форд", "шевроле", "шкода"]
+        
+        for brand in brands:
+            if brand in message_lower:
+                return brand.title()
+        return None
+
+    def _extract_budget_keywords(self, message: str) -> Optional[str]:
+        """Fallback извлечение бюджета по ключевым словам"""
+        message_lower = message.lower()
+        
+        # Паттерны для поиска бюджета
+        budget_patterns = [
+            r'(\d+[\s]*(?:млн|миллион[ов]*|миллиард[ов]*|м))',
+            r'(\d+[\s]*(?:тыс|тысяч[иа]*|к))',
+            r'(\d+[\s]*(?:руб|рублей|р))',
+            r'(до[\s]*\d+)',
+            r'(от[\s]*\d+[\s]*до[\s]*\d+)',
+            r'(около[\s]*\d+)'
+        ]
+        
+        text = re.sub(r"\s+", " ", message_lower.replace(',', '.')).strip()
+        for pattern in budget_patterns:
+            matches = re.findall(pattern, text)
+            if matches:
+                return matches[0]
+        
+        return None
+
     async def generate_ai_response(self, context: ConversationContext, user_message: str) -> str:
-        """Генерирует AI ответ с использованием промтов"""
+        """Генерирует AI ответ с использованием полной истории диалога"""
         if not self.ai_enabled:
             logger.warning("AI not enabled, using fallback response")
             return self._get_fallback_response(context)
@@ -364,35 +517,63 @@ class AutoResponder:
         if context:
             context.message_history.append(user_message)
 
-        # Определяем стадию разговора
-        if not context or context.questions_asked == 0:
-            system_prompt = CAR_INTEREST_PROMPTS["initial"]
-        elif not context.interested:
-            if self.is_positive_response(user_message):
-                context.interested = True
-                system_prompt = CAR_INTEREST_PROMPTS["brand"]
-            else:
-                return "Хорошо, если понадобится помощь с выбором автомобиля - обращайтесь!"
-        elif context.brand is None:
-            system_prompt = CAR_INTEREST_PROMPTS["brand"]
-        elif context.budget is None:
-            system_prompt = CAR_INTEREST_PROMPTS["budget"]
-        else:
-            system_prompt = CAR_INTEREST_PROMPTS["completion"]
-
         try:
+            # Формируем историю диалога для контекста
+            conversation_messages = []
+            
+            # Добавляем системный промпт
+            conversation_messages.append({
+                "role": "system", 
+                "content": CAR_INTEREST_PROMPTS["conversation"]
+            })
+            
+            # Добавляем контекст о клиенте если есть
+            context_info = []
+            if context.brand:
+                context_info.append(f"Марка: {context.brand}")
+            if context.budget:
+                context_info.append(f"Бюджет: {context.budget}")
+            if context.interested is not None:
+                context_info.append(f"Интерес: {'заинтересован' if context.interested else 'не заинтересован'}")
+            
+            if context_info:
+                conversation_messages.append({
+                    "role": "system",
+                    "content": f"Информация о клиенте: {', '.join(context_info)}"
+                })
+            
+            # Добавляем историю сообщений (последние 10 для контекста)
+            if context.message_history and len(context.message_history) > 0:
+                # Конвертируем deque в список и берем последние сообщения
+                history_list = list(context.message_history)
+                history_to_include = history_list[-10:] if len(history_list) > 10 else history_list
+                
+                for i, msg in enumerate(history_to_include):
+                    role = "user" if i % 2 == 0 else "assistant"
+                    conversation_messages.append({
+                        "role": role,
+                        "content": msg
+                    })
+            
+            # Добавляем текущее сообщение пользователя (если его еще нет)
+            current_message_exists = any(msg["content"] == user_message for msg in conversation_messages)
+            if not current_message_exists:
+                conversation_messages.append({
+                    "role": "user",
+                    "content": user_message
+                })
+
             logger.info(f"Making OpenAI request with model: {self.config.ai_model}")
             response = await self.client.chat.completions.create(
                 model=self.config.ai_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
+                messages=conversation_messages,
                 max_tokens=self.config.ai_max_tokens,
+                temperature=0.7
             )
             answer = response.choices[0].message.content.strip()
             logger.info(f"AI response received: {answer[:50]}...")
             return answer
+            
         except Exception as e:
             error_msg = f"Ошибка генерации AI ответа: {e}"
             logger.error(error_msg)
@@ -411,70 +592,35 @@ class AutoResponder:
         else:
             return "Отлично! Спасибо за информацию. Наш менеджер свяжется с вами в ближайшее время для консультации."
 
-    def analyze_response(self, context: ConversationContext, message: str):
-        """Анализирует ответ пользователя на наличие марки и бюджета"""
-        message_lower = message.lower()
+    async def analyze_response(self, context: ConversationContext, message: str):
+        """AI анализ ответа пользователя на интерес, марку и бюджет"""
+        
+        # 1. Анализ интереса к покупке (если еще не определен)
+        if context.interested is None:
+            logger.info(f"Анализируем интерес для сообщения: '{message}'")
+            interested = await self.ai_analyze_interest(message, context.message_history)
+            context.interested = interested
+            logger.info(f"AI определил интерес: {'заинтересован' if interested else 'не заинтересован'}")
 
-        # Поиск марки автомобиля (только если еще не определена)
+        # 2. Извлечение марки автомобиля (если еще не определена)
         if not context.brand:
-            brands = ["toyota", "honda", "bmw", "mercedes", "audi", "volkswagen",
-                      "kia", "hyundai", "nissan", "mazda", "subaru", "lexus",
-                      "lada", "renault", "peugeot", "ford", "chevrolet", "skoda",
-                      "тойота", "хонда", "бмв", "мерседес", "ауди", "фольксваген",
-                      "киа", "хендай", "ниссан", "мазда", "субару", "лексус",
-                      "лада", "рено", "пежо", "форд", "шевроле", "шкода"]
+            brand = await self.ai_extract_brand(message, context.message_history)
+            if brand:
+                context.brand = brand
+                self.stats['cars_identified'] += 1
+                logger.info(f"AI извлек марку: {brand}")
 
-            for brand in brands:
-                if brand in message_lower:
-                    context.brand = brand.title()
-                    self.stats['cars_identified'] += 1
-                    break
-
-        # Поиск бюджета (только если еще не определен)
+        # 3. Извлечение бюджета (если еще не определен)
         if not context.budget:
-            # Проверяем различные форматы указания бюджета
-            budget_patterns = [
-                r'(\d+(?:\s?\d+)*)\s*(?:тысяч?|тыс\.?|k)\s*(?:рублей?|руб\.?|₽)?',
-                r'(\d+(?:\s?\d+)*)\s*(?:рублей?|руб\.?|₽)',
-                r'(\d+(?:\s?\d+)*)\s*(?:миллионов?|млн\.?)\s*(?:рублей?|руб\.?|₽)?',
-                r'до\s+(\d+(?:\s?\d+)*)\s*(?:тысяч?|тыс\.?|рублей?|руб\.?|₽|млн\.?)',
-                r'от\s+(\d+(?:\s?\d+)*)\s*(?:тысяч?|тыс\.?|рублей?|руб\.?|₽|млн\.?)',
-                r'(\d+(?:\s?\d+)*)\s*[-–]\s*(\d+(?:\s?\d+)*)\s*(?:тысяч?|тыс\.?|рублей?|руб\.?|₽|млн\.?)',
-                r'(\d+)\s*млн',
-                r'(\d+)\s*миллион',
-            ]
-
-            for pattern in budget_patterns:
-                matches = re.findall(pattern, message_lower.replace(',', '').replace(' ', ''))
-                if matches:
-                    if isinstance(matches[0], tuple):
-                        # Диапазон цен
-                        min_price, max_price = matches[0]
-                        context.budget = f"{min_price}-{max_price} тыс. руб."
-                    else:
-                        # Конкретная сумма
-                        amount = matches[0]
-                        # Определяем масштаб суммы
-                        if 'млн' in message_lower or 'миллион' in message_lower:
-                            context.budget = f"{amount} млн. руб."
-                        elif len(amount) <= 3:
-                            context.budget = f"{amount} тыс. руб."
-                        else:
-                            # Форматируем крупные суммы с пробелами
-                            formatted_amount = f"{int(amount):,}".replace(',', ' ')
-                            context.budget = f"{formatted_amount} руб."
-
-                    self.stats['budgets_collected'] += 1
-                    break
-
-            if not context.budget and any(
-                    word in message_lower for word in ['бюджет', 'цена', 'стоимость', 'рублей', 'тысяч', 'миллион']):
-                context.budget = message.strip()
+            budget = await self.ai_extract_budget(message, context.message_history)
+            if budget:
+                context.budget = budget
                 self.stats['budgets_collected'] += 1
+                logger.info(f"AI извлек бюджет: {budget}")
 
     async def handle_message(self, user_id: str, message: str, phone: Optional[str] = None,
                              username: Optional[str] = None, first_name: Optional[str] = None) -> Optional[str]:
-        """Основной метод обработки сообщений"""
+        """Основной метод обработки сообщений - полностью AI-based"""
         if not self.enabled:
             logger.debug("AutoResponder disabled")
             return None
@@ -489,35 +635,44 @@ class AutoResponder:
             if first_name:
                 context.first_name = first_name
 
+        # Если диалог уже завершен, не отвечаем
         if context.status == "completed":
             return None
 
+        # Инициализация диалога
+        if context.questions_asked == 0:
+            context.questions_asked = 1
+            self.stats['conversations_started'] += 1
+            logger.info(f"Начат новый диалог с пользователем {user_id}")
 
-        context.questions_asked += 1
+        # AI анализ сообщения пользователя
+        await self.analyze_response(context, message)
+
+        # Обновляем счетчики
         self.stats['questions_asked'] += 1
 
-
-        self.analyze_response(context, message)
-
-        if context.questions_asked > 0:
-            context.questions_asked += 1
-            self.stats['questions_asked'] += 1
-
-        # Проверяем, завершен ли опрос (есть и марка и бюджет)
-        has_both_info = context.brand and context.budget
+        # Проверяем условия завершения диалога
+        has_both_info = context.brand and context.budget and context.interested
         reached_max_questions = context.questions_asked >= self.config.max_questions
+        not_interested = context.interested is False
 
-        if has_both_info or reached_max_questions:
+        if has_both_info or reached_max_questions or not_interested:
             context.status = "completed"
-            self.stats['leads_completed'] += 1
-            await self._send_lead_notification(context)
-
+            
+            # Отправляем уведомление менеджерам если есть полная информация
             if has_both_info:
-                return "Спасибо за информацию! Наш менеджер свяжется с вами в ближайшее время для консультации."
-            else:
-                return "Спасибо! Мы передали вашу информацию менеджеру, он свяжется с вами для уточнения деталей."
+                self.stats['leads_completed'] += 1
+                await self._send_lead_notification(context)
+                logger.info(f"Лид завершен: {context.brand}, {context.budget}")
+            
+            # AI генерирует финальный ответ
+            response = await self.generate_ai_response(context, message)
+            return response
 
-        # Генерируем ответ
+        # Увеличиваем счетчик вопросов для продолжения диалога
+        context.questions_asked += 1
+
+        # AI генерирует ответ для продолжения диалога
         response = await self.generate_ai_response(context, message)
         return response
 
