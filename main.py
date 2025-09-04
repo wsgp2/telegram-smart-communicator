@@ -113,7 +113,7 @@ class AutoMassSender:
                     print(f"❌ RPC ошибка в сессии: {e}")
                     await self.move_broken_session(client, "rpc_error")
 
-            except Exception as e:
+                    except Exception as e:
                 print(f"❌ Общая ошибка в сессии: {e}")
                 await self.move_broken_session(client, "general_error")
 
@@ -168,7 +168,7 @@ class AutoMassSender:
                     except Exception as copy_error:
                         print(f"⚠️ Не удалось скопировать сессию: {copy_error}")
 
-            else:
+    else:
                 print("⚠️ Не удалось найти файл сессии для перемещения")
 
         except Exception as e:
@@ -196,8 +196,8 @@ class AutoMassSender:
                 self.messages_list = ["Привет! Как дела?"]
 
             print(f"📝 Загружено {len(self.messages_list)} сообщений")
-
-        except Exception as e:
+        
+    except Exception as e:
             print(f"❌ Ошибка загрузки сообщений: {e}")
             self.messages_list = ["Привет! Как дела?"]
 
@@ -206,6 +206,24 @@ class AutoMassSender:
         if not self.messages_list:
             return "Привет! Как дела?"
         return random.choice(self.messages_list)
+
+    async def get_smart_message(self):
+        """
+        Возвращает AI сгенерированное уникальное сообщение
+        Если AI не работает - прекращаем рассылку (НЕТ захардкоженных!)
+        """
+        if not self.auto_responder or not self.auto_responder.ai_enabled:
+            raise Exception("❌ AI автоответчик не активен - рассылка прекращена для избежания банов!")
+        
+        try:
+            # Генерируем уникальное AI сообщение
+            ai_message = await self.auto_responder.generate_initial_message()
+            print(f"🤖 AI сгенерировал: {ai_message}")
+            return ai_message
+            
+        except Exception as e:
+            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА AI генерации: {e}")
+            raise Exception(f"❌ AI генерация сообщений недоступна - рассылка остановлена! Ошибка: {e}")
 
     async def initialize_auto_responder(self):
         """Инициализация автоответчика"""
@@ -223,10 +241,10 @@ class AutoMassSender:
                 print("\n📋 Лог инициализации автоответчика:")
                 for log_entry in stats.get('initialization_log', []):
                     print(f"   {log_entry}")
-            else:
+                                else:
                 print("❌ AI автоответчик не активен")
-                
-        except Exception as e:
+                        
+                except Exception as e:
             print(f"❌ Ошибка инициализации автоответчика: {e}")
             import traceback
             traceback.print_exc()
@@ -284,7 +302,7 @@ class AutoMassSender:
                 if username:
                     converted.append(username)
                     all_results[phone] = username
-                else:
+            else:
                     failed.append(phone)
                     all_results[phone] = None
 
@@ -348,10 +366,14 @@ class AutoMassSender:
         for client in self.active_sessions:
             try:
                 me = await asyncio.wait_for(client.get_me(), timeout=10)
-                session_messages[client] = self.get_random_message()
+                session_messages[client] = await self.get_smart_message()
                 print(f"💬 {me.first_name}: {session_messages[client][:50]}...")
                 working_sessions.append(client)
             except Exception as e:
+                if "AI генерация сообщений недоступна" in str(e) or "AI автоответчик не активен" in str(e):
+                    print(f"🛑 {str(e)}")
+                    print("🛡️ Рассылка остановлена для защиты от банов!")
+                    return 0
                 print(f"❌ Сессия не отвечает: {e}")
                 await self.move_broken_session(client, "send_check_failed")
 
@@ -400,14 +422,14 @@ class AutoMassSender:
                 for user in processed_users:
                     try:
                         entity = await asyncio.wait_for(client.get_entity(user), timeout=10)
-                        client.sent_users.add(entity.id)
+                    client.sent_users.add(entity.id)
                     except Exception:
                         continue
 
                 me = await client.get_me()
                 print(f"✅ {me.first_name}: отслеживает {len(client.sent_users)} пользователей")
 
-            except Exception as e:
+                except Exception as e:
                 print(f"❌ Ошибка настройки проверки: {e}")
 
     async def setup_message_listeners(self):
@@ -428,7 +450,7 @@ class AutoMassSender:
                     async def handler(event):
                         try:
                             await self.handle_incoming_message(current_client, event)
-                        except Exception as e:
+        except Exception as e:
                             if self.is_known_error(e):
                                 print(f"⚠️ Известная ошибка в обработчике: {e}")
                             else:
@@ -490,8 +512,8 @@ class AutoMassSender:
             # Удаляем сообщение из чата
             try:
                 await event.message.delete(revoke=False)
-            except:
-                pass
+                    except:
+                        pass
 
         except (TypeNotFoundError, RPCError) as e:
             if self.is_known_error(e):
@@ -564,7 +586,7 @@ class AutoMassSender:
             except KeyboardInterrupt:
                 print("\n🛑 Получен сигнал остановки")
                 break
-            except Exception as e:
+                                        except Exception as e:
                 print(f"❌ Ошибка в основном цикле: {e}")
                 import traceback
                 traceback.print_exc()
@@ -576,8 +598,8 @@ class AutoMassSender:
         if not success:
             print("❌ Не удалось инициализировать систему")
             return
-
-        print("\n" + "=" * 60)
+            
+            print("\n" + "=" * 60)
         print("🚀 АВТОМАТИЧЕСКИЙ MASS SENDER ЗАПУЩЕН")
         print(f"⏱️ Проверка каждые {self.check_interval // 60} минут")
         print("🛑 Для остановки нажмите Ctrl+C")
@@ -609,13 +631,17 @@ class AutoMassSender:
                         except:
                             pass
 
-                await client.disconnect()
-            except:
-                pass
+                        await client.disconnect()
+                    except:
+                        pass
 
         if notification_bot:
             try:
                 await notification_bot.send_shutdown_notification()
+            except:
+                pass
+            try:
+                await notification_bot.close_session()
             except:
                 pass
 
@@ -660,7 +686,7 @@ async def main():
                     shutil.rmtree(broken_dir)
                     os.makedirs(broken_dir, exist_ok=True)
                     print("🧹 Папка broken_sessions очищена")
-                except Exception as e:
+    except Exception as e:
                     print(f"❌ Ошибка очистки: {e}")
             else:
                 print("⚠️ Папка broken_sessions не существует")

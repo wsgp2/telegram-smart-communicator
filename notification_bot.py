@@ -19,6 +19,12 @@ class NotificationBot:
             self._session = aiohttp.ClientSession()
         return self._session
 
+    async def close_session(self):
+        """Закрывает aiohttp сессию"""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            print("🔧 Notification bot session закрыта")
+
     async def _send_to_group(self, text, parse_mode="HTML"):
         session = await self._get_session()
         payload = {'chat_id': self.group_chat_id, 'text': text, 'parse_mode': parse_mode}
