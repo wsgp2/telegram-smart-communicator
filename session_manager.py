@@ -63,7 +63,9 @@ class SessionManager:
     async def _load_all_sessions(self, session_files):
         """Создание клиентов Telegram с прокси и проверкой сессий"""
         proxies = self.proxy_manager.load_proxies()
-        assigned_proxies = self.proxy_manager.assign_proxies_to_sessions(
+
+        # Используем assign_proxies_to_sessions который НЕ создает кортежи
+        assigned_proxies = self._assign_proxies_raw(
             session_files, proxies, self.config.get("accounts_per_proxy", 1)
         )
 
@@ -75,6 +77,40 @@ class SessionManager:
         print(f"✅ Рабочих сессий: {len(sessions)}/{len(session_files)}")
         return sessions
 
+    def _assign_proxies_raw(self, session_files, proxies, accounts_per_proxy):
+        """Распределение прокси по сессиям БЕЗ создания кортежей"""
+        if not proxies:
+            print("⚠️ Нет доступных прокси для распределения")
+            return [None] * len(session_files)
+
+        if not session_files:
+            print("⚠️ Нет сессий для распределения прокси")
+            return []
+
+        assigned = []
+        proxy_count = len(proxies)
+
+        print(
+            f"📊 Распределяем {proxy_count} прокси на {len(session_files)} сессий ({accounts_per_proxy} аккаунтов на прокси)")
+
+        for idx, session in enumerate(session_files):
+            try:
+                proxy_idx = (idx // accounts_per_proxy) % proxy_count
+                # Просто добавляем сырые данные прокси
+                assigned.append(proxies[proxy_idx])
+
+                if proxies[proxy_idx]:
+                    proxy_type, host, port = proxies[proxy_idx][0], proxies[proxy_idx][1], proxies[proxy_idx][2]
+                    print(f"📍 Сессия {os.path.basename(session)} -> {proxy_type}://{host}:{port}")
+                else:
+                    print(f"⚠️ Сессия {os.path.basename(session)} -> без прокси")
+
+            except Exception as e:
+                print(f"❌ Ошибка назначения прокси для {session}: {e}")
+                assigned.append(None)
+
+        return assigned
+
     async def _create_session_task(self, fname, proxy_info):
         """Создание и проверка одного клиента Telegram"""
         name = os.path.splitext(fname)[0]
@@ -82,7 +118,9 @@ class SessionManager:
         client = None
 
         try:
+            # Теперь создаем кортеж только один раз
             proxy_tuple = self.proxy_manager.create_proxy_tuple(proxy_info) if proxy_info else None
+
             client = TelegramClient(
                 session_path,
                 int(self.config["api_id"]),
@@ -118,7 +156,7 @@ class SessionManager:
                 client.chat_manager.auto_delete_delay = self.config.get('auto_delete_delay', 4)
 
             client.sent_users = set()
-            proxy_info_str = f"{proxy_info[0]}://{proxy_info[1]}:{proxy_info[2]}" if proxy_info else "без прокси"
+            proxy_info_str = f"{proxy_tuple[0]}://{proxy_tuple[1]}:{proxy_tuple[2]}" if proxy_tuple else "без прокси"
             print(f"✅ {me.first_name} ({me.phone}) -> {proxy_info_str}")
             return client
 

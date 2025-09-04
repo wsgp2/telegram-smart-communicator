@@ -20,7 +20,8 @@ def ensure_dirs(cfg):
         os.path.dirname(cfg.get("processed_users_file", "data/processed_users.txt")),
         os.path.dirname(cfg.get("new_users_file", "data/new_users.txt")),
         os.path.dirname(cfg.get("messages_file", "data/messages.txt")),
-        os.path.dirname(cfg.get("log_file", "logs/app.log"))
+        os.path.dirname(cfg.get("log_file", "logs/app.log")),
+        os.path.dirname(cfg.get("phone_numbers_file", "data/phone_numbers.txt"))
     ]:
         if path and not os.path.exists(path):
             os.makedirs(path, exist_ok=True)

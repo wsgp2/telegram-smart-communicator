@@ -1,138 +1,141 @@
 #!/usr/bin/env python3
 """
-📡 ОТДЕЛЬНАЯ КОНСОЛЬ ДЛЯ ПРОСЛУШКИ
-Запускается в отдельном окне и показывает все ответы
+📡 ListenerConsole - прослушка входящих сообщений с автоответчиком
 """
+
 import asyncio
 import os
 import sys
 from datetime import datetime
 
-# Добавляем путь для импортов
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from telethon import events
+from config import load_config
 from notification_bot import init_notification_bot, notification_bot
 from auto_responder import init_auto_responder, get_auto_responder
-from config import load_config
 
 
 class ListenerConsole:
     def __init__(self):
         self.sessions = []
         self.is_listening = False
+        self.session_manager = None  # Добавляем ссылку на менеджер сессий
 
-    async def setup_listeners(self, sessions):
+    async def setup_listeners(self, sessions, session_manager=None):
         """Настройка обработчиков для всех сессий"""
         self.sessions = sessions
+        self.session_manager = session_manager
         self.is_listening = True
-
-        print("🎧 НАСТРОЙКА ПРОСЛУШКИ")
+        print("🎧 Настройка прослушки...")
         print("=" * 60)
 
-        for client in sessions:
+        async def setup_client(client):
             try:
                 me = await client.get_me()
-                client.sent_users = set()  # Очищаем старые данные
+                client.sent_users = set()
 
                 # Загружаем обработанных пользователей
                 from user_manager import UserManager
                 user_manager = UserManager()
                 users_data = await user_manager.load_all_users()
-                processed_users = users_data["processed"]
+                processed_users = users_data.get("processed", [])
 
-                # Добавляем обработанных пользователей
+                # Добавляем их в кэш
                 for user in processed_users:
                     try:
                         entity = await client.get_entity(user)
                         client.sent_users.add(entity.id)
-                    except Exception as e:
-                        print(f"⚠️ Не удалось добавить {user}: {e}")
+                    except:
+                        continue
 
                 # Создаем обработчик
                 self._create_message_handler(client)
                 print(f"✅ {me.first_name}: готов к прослушке")
-
+                return len(processed_users)
             except Exception as e:
-                print(f"❌ Ошибка настройки {client}: {e}")
+                print(f"❌ Ошибка настройки клиента: {e}")
+                return 0
 
-        print(f"\n🎯 Прослушиваем {len(processed_users)} пользователей")
+        counts = await asyncio.gather(*[setup_client(c) for c in sessions])
+        total_users = sum(counts)
+
+        print(f"\n🎯 Прослушиваем {total_users} пользователей")
         print("💬 Все ответы будут здесь и в Telegram-боте")
         print("=" * 60)
 
     def _create_message_handler(self, client):
-        """Создает обработчик сообщений с выводом в консоль и бота"""
+        """Создает обработчик сообщений с выводом в консоль и ботом"""
+        auto_responder = get_auto_responder()
 
         @client.on(events.NewMessage(incoming=True))
         async def handler(event):
             try:
                 sender = await event.get_sender()
-                text = event.raw_text
-
                 if not sender:
                     return
 
-                # Получаем информацию о нашем аккаунте
-                me = await event.client.get_me()
+                if sender.id not in client.sent_users:
+                    return
 
-                # 🔥 ВЫВОД В КОНСОЛЬ (это окно)
+                text = event.raw_text
+                me = await client.get_me()
                 timestamp = datetime.now().strftime("%H:%M:%S")
-                print(f"\n[{timestamp}] 📩 {sender.first_name} -> {me.first_name}:")
-                print(f"   💬 {text}")
-                print("   " + "─" * 50)
 
-                # 🔥 ОТПРАВКА В БОТА
+                # Вывод в консоль
+                print(f"\n[{timestamp}] 📩 {sender.first_name} -> {me.first_name}: {text}")
+                print("─" * 60)
+
+                # Отправка уведомления в бот
                 if notification_bot:
-                    account_info = {
-                        'phone': me.phone or 'Unknown',
-                        'name': me.first_name or 'Unknown'
-                    }
-                    sender_info = {
-                        'name': sender.first_name or 'Unknown',
-                        'username': sender.username or 'No username'
-                    }
+                    account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
+                    sender_info = {'name': sender.first_name or 'Unknown', 'username': sender.username or 'No username'}
+                    asyncio.create_task(notification_bot.send_notification(account_info, sender_info, text))
 
-                    await notification_bot.send_notification(account_info, sender_info, text)
+                # Автоответчик - используем текущего клиента для ответа
+                if auto_responder:
+                    asyncio.create_task(self._handle_auto_response(client, sender, text))
 
-                # 🤖 АВТООТВЕТЧИК - Проверка интереса к покупке автомобиля
-                auto_responder = get_auto_responder()
-                if auto_responder and auto_responder.enabled:
-                    try:
-                        # Получаем последние 50 сообщений из диалога для ИИ анализа
-                        conversation_history = []
-                        try:
-                            messages = await client.get_messages(sender, limit=50)
-                            conversation_history = [msg.message for msg in reversed(messages) if msg.message]
-                            print(f"   📊 История чата: {len(conversation_history)} сообщений для ИИ анализа")
-                        except Exception as hist_e:
-                            print(f"   ⚠️ Не удалось получить историю чата: {hist_e}")
-                        
-                        ai_response = await auto_responder.process_user_message(sender, text, client, conversation_history)
-                        if ai_response:
-                            print(f"   🤖 Автоответ: {ai_response}")
-                            # Отправляем ответ пользователю
-                            await client.send_message(sender, ai_response)
-                            print(f"   ✅ Автоответ отправлен пользователю {sender.first_name}")
-                    except Exception as e:
-                        print(f"   ❌ Ошибка автоответчика: {e}")
-
-                # 🗑️ Удаляем сообщение у себя
+                # Удаляем сообщение у себя
                 try:
                     await event.message.delete(revoke=False)
                 except:
                     pass
 
             except Exception as e:
-                print(f"❌ Ошибка обработки: {e}")
+                print(f"❌ Ошибка обработки сообщения: {e}")
+
+    async def _handle_auto_response(self, client, sender, text):
+        """Асинхронная обработка автоответа через AutoResponder"""
+        auto_responder = get_auto_responder()
+        if not auto_responder:
+            return
+
+        try:
+            response = await auto_responder.handle_message(str(sender.id), text)
+            if response:
+                # Используем текущего клиента для отправки ответа
+                await client.send_message(sender.id, response)
+                print(f"🤖 Автоответ отправлен {sender.first_name}: {response}")
+
+                # Также уведомляем в бота
+                if notification_bot:
+                    me = await client.get_me()
+                    account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
+                    sender_info = {'name': sender.first_name or 'Unknown', 'username': sender.username or 'No username'}
+                    asyncio.create_task(notification_bot.send_notification(
+                        account_info, sender_info, f"🤖 Автоответ: {response}", is_auto_response=True
+                    ))
+        except Exception as e:
+            print(f"❌ Ошибка автоответчика: {e}")
 
     async def start_listening(self):
-        """Запуск прослушивания"""
+        """Запуск прослушивания всех сессий"""
         if not self.sessions:
             print("❌ Нет сессий для прослушивания!")
             return
 
-        print("\n🚀 ЗАПУСК ПРОСЛУШКИ...")
-        print("Нажмите Ctrl+C для остановки")
+        print("\n🚀 Запуск прослушки... Нажмите Ctrl+C для остановки")
         print("=" * 60)
 
         try:
@@ -144,36 +147,27 @@ class ListenerConsole:
 
 
 async def main():
-    """Главная функция"""
-    print("📡 ЗАГРУЗКА КОНСОЛИ ПРОСЛУШКИ")
+    print("📡 Загрузка консоли прослушки")
     print("=" * 60)
-
-    # Инициализируем бота
     init_notification_bot()
-
-    # Инициализируем автоответчик
     config = load_config()
-    init_auto_responder(config)
-    auto_responder = get_auto_responder()
-    if auto_responder.enabled:
-        print(f"🤖 Автоответчик включен (AI: {auto_responder.ai_enabled})")
-        print(f"   Макс. вопросов: {auto_responder.max_questions}")
-        print(f"   Активных разговоров: {len(auto_responder.conversations)}")
-    else:
-        print("🤖 Автоответчик выключен")
-
-    # Загружаем сессии
     from session_manager import SessionManager
     session_manager = SessionManager()
     sessions = await session_manager.load_sessions()
-
     if not sessions:
         print("❌ Нет доступных сессий!")
         return
 
-    # Настраиваем и запускаем прослушку
+    init_auto_responder(config, session_manager)
+
+    ar = get_auto_responder()
+    if ar :
+        print(f"🤖 Автоответчик включен ")
+    else:
+        print("🤖 Автоответчик выключен")
+
     listener = ListenerConsole()
-    await listener.setup_listeners(sessions)
+    await listener.setup_listeners(sessions, session_manager)
     await listener.start_listening()
 
 
