@@ -149,8 +149,15 @@ class ListenerConsole:
 async def main():
     print("📡 Загрузка консоли прослушки")
     print("=" * 60)
-    init_notification_bot()
     config = load_config()
+    
+    # Инициализация notification_bot только если включен
+    if config.get("notification_bot", {}).get("enabled", False):
+        bot_token = config.get("notification_bot", {}).get("token")
+        chat_id = config.get("notification_bot", {}).get("admin_chat_id")
+        init_notification_bot(bot_token, chat_id)
+    else:
+        print("⚠️ Notification Bot отключен в конфигурации")
     from session_manager import SessionManager
     session_manager = SessionManager()
     sessions = await session_manager.load_sessions()

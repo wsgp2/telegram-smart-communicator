@@ -57,7 +57,12 @@ class AutoMassSender:
         # Загрузка сообщений
         await self.load_messages()
         # Инициализация компонентов
-        init_notification_bot()
+        if self.config.get("notification_bot", {}).get("enabled", False):
+            bot_token = self.config.get("notification_bot", {}).get("token")
+            chat_id = self.config.get("notification_bot", {}).get("admin_chat_id")
+            init_notification_bot(bot_token, chat_id)
+        else:
+            print("⚠️ Notification Bot отключен в конфигурации")
 
         # Загрузка сессий
         self.active_sessions = await self.session_manager.load_sessions()
