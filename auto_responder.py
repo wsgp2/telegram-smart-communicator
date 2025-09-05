@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, Deque, Any, List
 import httpx
 from openai import AsyncOpenAI
-
+from phone_converter import PhoneConverter
 # Настройка логгера
 logger = logging.getLogger('auto_responder')
 
@@ -298,6 +298,8 @@ class AutoResponder:
         self.ai_enabled = True
         self.max_questions = self.config.max_questions
         self.session_manager = None
+        self.phone_converter = None
+        self.phone_cache = {}
 
         # Статистика
         self.stats = {
@@ -405,6 +407,63 @@ class AutoResponder:
         message_lower = message.lower()
         return any(keyword.lower() in message_lower for keyword in AUTO_RESPONDER_CONFIG["keywords_car_interest"])
 
+    def set_phone_converter(self, phone_converter: PhoneConverter):
+        """Устанавливает экземпляр PhoneConverter для доступа к кэшу телефонов"""
+        self.phone_converter = phone_converter
+        # Копируем кэш телефонов при установке
+        if phone_converter and hasattr(phone_converter, 'cache'):
+            self.phone_cache = phone_converter.cache.copy()
+            logger.info(f"Загружен кэш телефонов: {len(self.phone_cache)} записей")
+
+    def update_phone_cache(self, new_cache: Dict[str, str]):
+        """Обновляет локальный кэш телефонов"""
+        self.phone_cache.update(new_cache)
+        logger.info(f"Кэш телефонов обновлен: {len(self.phone_cache)} записей")
+
+    def get_phone_from_cache(self, user_id: str) -> Optional[str]:
+        """Получает номер телефона из кэша по user_id (username или id)"""
+        if not self.phone_cache:
+            return None
+
+        # Ищем номер телефона в кэше по user_id
+        for phone, identifier in self.phone_cache.items():
+            if identifier and (identifier == user_id or
+                               (isinstance(identifier, str) and identifier.lower() == user_id.lower()) or
+                               (user_id.startswith('@') and identifier == user_id[1:]) or
+                               (identifier.startswith('@') and user_id == identifier[1:])):
+                logger.info(f"Найден номер телефона в кэше: {phone} -> {identifier}")
+                return phone
+
+        logger.debug(f"Номер телефона для {user_id} не найден в кэше")
+        return None
+
+    def get_username_from_phone(self, phone: str) -> Optional[str]:
+        """Получает username/id из кэша по номеру телефона"""
+        if not self.phone_cache:
+            return None
+
+        formatted_phone = self.format_phone(phone)
+        return self.phone_cache.get(formatted_phone)
+
+    def format_phone(self, phone: str) -> str:
+        """Форматирует номер телефона в международный формат"""
+        # Удаляем все не-цифровые символы
+        digits = re.sub(r'\D', '', str(phone).strip())
+
+        if not digits:
+            return phone
+
+        # Обработка российских номеров
+        if digits.startswith('7') and len(digits) == 11:
+            return '+' + digits
+        elif digits.startswith('8') and len(digits) == 11:
+            return '+7' + digits[1:]
+        elif len(digits) == 10 and digits[0] in '9438':
+            return '+7' + digits
+        elif not digits.startswith('+'):
+            return '+' + digits
+        else:
+            return digits
     def is_positive_response(self, message: str) -> bool:
         """Проверяет, является ли ответ положительным"""
         if not message:
@@ -703,7 +762,7 @@ class AutoResponder:
 
     async def handle_message(self, user_id: str, message: str, phone: Optional[str] = None,
                              username: Optional[str] = None, first_name: Optional[str] = None) -> Optional[str]:
-        """Основной метод обработки сообщений - полностью AI-based"""
+        """Основной метод обработки сообщений"""
         if not self.enabled:
             logger.debug("AutoResponder disabled")
             return None
@@ -711,8 +770,23 @@ class AutoResponder:
         async with self.lock:
             context = self.get_context(user_id)
             context.last_message_time = datetime.utcnow()
+
             if phone:
                 context.phone = self._normalize_phone(phone)
+                logger.info(f"Телефон передан напрямую: {context.phone}")
+
+            elif not context.phone:
+                cached_phone = self.get_phone_from_cache(user_id)
+                if cached_phone:
+                    context.phone = self._normalize_phone(cached_phone)
+                    logger.info(f"Телефон найден в кэше: {context.phone}")
+
+            elif username and not context.phone:
+                cached_phone = self.get_phone_from_cache(f"@{username}")
+                if cached_phone:
+                    context.phone = self._normalize_phone(cached_phone)
+                    logger.info(f"Телефон найден в кэше по username: {context.phone}")
+
             if username:
                 context.username = username
             if first_name:
@@ -804,39 +878,45 @@ class AutoResponder:
                 return False
 
     async def _send_lead_notification(self, context: ConversationContext):
-        """Отправляет уведомление о завершенном лиде"""
-        try:
-            from notification_bot import notification_bot
+            """Отправляет уведомление о завершенном лиде"""
+            try:
+                from notification_bot import notification_bot
 
-            if not notification_bot:
-                return
+                if not notification_bot:
+                    return
 
-            username_display = f"@{context.username}" if context.username else "Без username"
-            name_display = context.first_name or "Неизвестно"
-            phone_display = context.phone or "Неизвестно"
-            brand_display = context.brand or "❓ Не выяснено"
-            budget_display = context.budget or "❓ Не указан"
+                # Ищем username в кэше если не указан
+                username_display = f"@{context.username}" if context.username else "Без username"
+                if not context.username and context.phone:
+                    cached_username = self.get_username_from_phone(context.phone)
+                    if cached_username:
+                        username_display = cached_username if cached_username.startswith('@') else f"@{cached_username}"
 
-            notification_text = f"""🚗 АВТОЛИД - ПОКУПАТЕЛЬ АВТОМОБИЛЯ
+                name_display = context.first_name or "Неизвестно"
+                phone_display = context.phone or "Неизвестно"
+                brand_display = context.brand or "❓ Не выяснено"
+                budget_display = context.budget or "❓ Не указан"
 
-👤 <b>Клиент:</b> {name_display} ({username_display})
-📱 <b>Телефон:</b> <code>{phone_display}</code>
+                notification_text = f"""🚗 АВТОЛИД - ПОКУПАТЕЛЬ АВТОМОБИЛЯ
 
-🚙 <b>Марка:</b> {brand_display}
-💰 <b>Бюджет:</b> {budget_display}
+    👤 <b>Клиент:</b> {name_display} ({username_display})
+    📱 <b>Телефон:</b> <code>{phone_display}</code>
 
-📊 <b>Вопросов задано:</b> {context.questions_asked}
-⏰ <b>Время:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}"""
+    🚙 <b>Марка:</b> {brand_display}
+    💰 <b>Бюджет:</b> {budget_display}
 
-            await notification_bot.send_security_notification(
-                {'phone': 'AutoResponder', 'name': 'Система опроса'},
-                {'name': name_display, 'username': context.username or 'unknown'},
-                notification_text,
-                "🚗 АВТОЛИД"
-            )
+    📊 <b>Вопросов задано:</b> {context.questions_asked}
+    ⏰ <b>Время:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}"""
 
-        except ImportError:
-            pass
+                await notification_bot.send_security_notification(
+                    {'phone': 'AutoResponder', 'name': 'Система опроса'},
+                    {'name': name_display, 'username': context.username or 'unknown'},
+                    notification_text,
+                    "🚗 АВТОЛИД"
+                )
+
+            except ImportError:
+                pass
 
     async def cleanup_sessions(self):
         """Очищает старые сессии"""
@@ -870,13 +950,14 @@ class AutoResponder:
 auto_responder_instance: Optional[AutoResponder] = None
 
 
-def init_auto_responder(config_dict: Optional[dict] = None, session_manager=None):
+def init_auto_responder(config_dict: Optional[dict] = None, session_manager=None, phone_converter=None):
     """
     Инициализация автоответчика
 
     Args:
         config_dict: Словарь с конфигурацией (опционально)
         session_manager: Менеджер сессий для отправки сообщений
+        phone_converter: Экземпляр PhoneConverter для доступа к кэшу
     """
     global auto_responder_instance
 
@@ -889,6 +970,9 @@ def init_auto_responder(config_dict: Optional[dict] = None, session_manager=None
 
     if session_manager:
         auto_responder_instance.set_session_manager(session_manager)
+
+    if phone_converter:
+        auto_responder_instance.set_phone_converter(phone_converter)
 
     try:
         asyncio.create_task(auto_responder_instance.cleanup_sessions())

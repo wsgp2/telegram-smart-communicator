@@ -33,19 +33,36 @@ class ListenerConsole:
         async def setup_client(client):
             try:
                 me = await client.get_me()
-                client.sent_users = set()
+                client.sent_users = set()  # Для прослушки всех
+                client.processed_users = set()  # ТОЛЬКО для автоответчика
 
                 # Загружаем обработанных пользователей
                 from user_manager import UserManager
                 user_manager = UserManager()
                 users_data = await user_manager.load_all_users()
                 processed_users = users_data.get("processed", [])
+                target_users = users_data.get("target", [])
 
-                # Добавляем их в кэш
-                for user in processed_users:
+                # 🔧 РАЗДЕЛЯЕМ ЛОГИКУ: Прослушка ВСЕХ, Автоответчик ТОЛЬКО processed
+                all_users_to_listen = set(processed_users + target_users)
+                print(f"📡 Настройка прослушки: {len(processed_users)} processed + {len(target_users)} target = {len(all_users_to_listen)} пользователей")
+                print(f"🤖 Автоответчик будет отвечать только {len(processed_users)} processed пользователям")
+
+                # Добавляем ВСЕХ в прослушку (чтобы не пропустить сообщения)
+                for user in all_users_to_listen:
                     try:
                         entity = await client.get_entity(user)
                         client.sent_users.add(entity.id)
+                        print(f"📡 Слушаем: {user}")
+                    except:
+                        continue
+
+                # Добавляем ТОЛЬКО processed в автоответчик
+                for user in processed_users:
+                    try:
+                        entity = await client.get_entity(user)
+                        client.processed_users.add(entity.id)
+                        print(f"🤖 Автоответ: {user}")
                     except:
                         continue
 
@@ -75,8 +92,12 @@ class ListenerConsole:
                 if not sender:
                     return
 
+                # 🔧 ФИЛЬТР: Слушаем всех, но отвечаем только processed
                 if sender.id not in client.sent_users:
-                    return
+                    return  # Игнорируем сообщения от посторонних
+
+                # Проверяем, должен ли автоответчик реагировать на этого пользователя
+                should_auto_respond = sender.id in client.processed_users
 
                 text = event.raw_text
                 me = await client.get_me()
@@ -92,9 +113,12 @@ class ListenerConsole:
                     sender_info = {'name': sender.first_name or 'Unknown', 'username': sender.username or 'No username'}
                     asyncio.create_task(notification_bot.send_notification(account_info, sender_info, text))
 
-                # Автоответчик - используем текущего клиента для ответа
-                if auto_responder:
+                # Автоответчик - ТОЛЬКО для processed пользователей
+                if auto_responder and should_auto_respond:
+                    print(f"🤖 Запуск автоответчика для {sender.first_name} (processed)")
                     asyncio.create_task(self._handle_auto_response(client, sender, text))
+                elif not should_auto_respond:
+                    print(f"📝 Сообщение от {sender.first_name} (target - НЕ processed, автоответчик НЕ запущен)")
 
                 # Удаляем сообщение у себя
                 try:
@@ -124,7 +148,7 @@ class ListenerConsole:
                     account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
                     sender_info = {'name': sender.first_name or 'Unknown', 'username': sender.username or 'No username'}
                     asyncio.create_task(notification_bot.send_notification(
-                        account_info, sender_info, f"🤖 Автоответ: {response}", is_auto_response=True
+                        account_info, sender_info, f"🤖 Автоответ: {response}"
                     ))
         except Exception as e:
             print(f"❌ Ошибка автоответчика: {e}")
@@ -149,8 +173,15 @@ class ListenerConsole:
 async def main():
     print("📡 Загрузка консоли прослушки")
     print("=" * 60)
-    init_notification_bot()
     config = load_config()
+    
+    # Инициализация notification_bot только если включен
+    if config.get("notification_bot", {}).get("enabled", False):
+        bot_token = config.get("notification_bot", {}).get("token")
+        chat_id = config.get("notification_bot", {}).get("admin_chat_id")
+        init_notification_bot(bot_token, chat_id)
+    else:
+        print("⚠️ Notification Bot отключен в конфигурации")
     from session_manager import SessionManager
     session_manager = SessionManager()
     sessions = await session_manager.load_sessions()

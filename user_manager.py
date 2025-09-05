@@ -89,7 +89,17 @@ class UserManager:
         await self.save_users_async(self.config["target_users_file"], list(set(target_users)))
         await self.save_users_async(self.config["new_users_file"], [])
         return len(new_users)
+    async def move_target_to_processed(self):
+        """Переносит новых пользователей в основной список target"""
+        target_users = await self.load_users_async(self.config["target_users_file"])
+        if not target_users:
+            return 0
 
+        processed_users = await self.load_users_async(self.config["processed_users_file"])
+        processed_users.extend(target_users)
+        await self.save_users_async(self.config["processed_users_file"], list(set(processed_users)))
+        await self.save_users_async(self.config["target_users_file"], [])
+        return len(target_users)
     async def get_available_users_count(self):
         """Возвращает количество доступных для обработки пользователей"""
         target = await self.load_users_async(self.config["target_users_file"])
@@ -213,3 +223,4 @@ class UserManager:
         elif hasattr(entity, 'id'):
             return str(entity.id)
         return f"user_{hash(entity)}"
+
