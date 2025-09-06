@@ -18,7 +18,7 @@ from auto_responder import init_auto_responder, get_auto_responder
 from phone_converter import PhoneConverter
 from proxy_manager import ProxyManager
 from telethon import events
-from telethon.errors import FloodWaitError, RPCError, TypeNotFoundError
+from telethon.errors import FloodWaitError, RPCError, TypeNotFoundError, MsgidDecreaseRetryError
 from telethon.tl.functions.messages import SetTypingRequest
 from telethon.tl.types import SendMessageTypingAction
 
@@ -32,17 +32,33 @@ class AutoMassSender:
         self.proxy_manager = ProxyManager()
         self.active_sessions = []
         self.broken_sessions = []
+        self.all_time_processed_users = {}
+        self.session_processed_users = {}
+        self.processed_users_file = "data/all_processed_users.json"
         self.is_running = False
         self.is_sending = False
         self.check_interval = 10 * 60
         self.auto_responder = None
         self.messages_list = []
         self.first_run = True
+        self.load_processed_users_history()
+
+        # УЛУЧШЕНИЕ: Словарь для отслеживания обработанных пользователей по сессиям
+        self.session_processed_users = {}
+
         self.known_error_patterns = [
             "9815cec8",
-            "type not found", 
+            "type not found",
             "cannot get difference",
-            "constructor not found"
+            "constructor not found",
+            "auth key duplicated",
+            "session revoked",
+            "user deactivated",
+            "auth key invalid",
+            "msgiddecrease",
+            "internal issues",
+            "too many requests",
+            "sendmessagerequest"
         ]
 
     async def initialize(self):
@@ -58,6 +74,7 @@ class AutoMassSender:
 
         # Загрузка сообщений
         await self.load_messages()
+
         # Инициализация компонентов
         if self.config.get("notification_bot", {}).get("enabled", False):
             bot_token = self.config.get("notification_bot", {}).get("token")
@@ -68,8 +85,12 @@ class AutoMassSender:
 
         # Загрузка сессий
         self.active_sessions = await self.session_manager.load_sessions()
-        # Проверка работоспособности сессий
+
+        # Проверка работоспособности сессий с перемещением битых
         await self.check_sessions_health()
+
+        # Очистка цифровых ID из кэша и target_users
+        await self.clean_numeric_ids()
 
         if not self.active_sessions:
             print("❌ Нет доступных сессий!")
@@ -89,63 +110,74 @@ class AutoMassSender:
         return any(pattern in error_str for pattern in self.known_error_patterns)
 
     async def check_sessions_health(self):
-        """Проверка работоспособности сессий"""
+        """Проверка работоспособности сессий с автоматическим перемещением"""
         print("🔍 Проверка работоспособности сессий...")
 
         healthy_sessions = []
-        check_timeout = 15  # Таймаут проверки в секундах
+        check_timeout = 10
 
-        for client in self.active_sessions:
+        for i, client in enumerate(self.active_sessions[:]):
             try:
-                # Устанавливаем таймаут для проверки сессии
+                print(f"   Проверка сессии {i + 1}/{len(self.active_sessions)}...", end='\r')
+
+                if not client.is_connected():
+                    await client.connect()
+
                 me = await asyncio.wait_for(client.get_me(), timeout=check_timeout)
                 if me:
                     healthy_sessions.append(client)
                     phone_display = getattr(me, 'phone', 'unknown')
-                    print(f"✅ Сессия {phone_display} работоспособна")
+                    print(f"✅ Сессия {phone_display} работоспособна                    ")
 
-            except asyncio.TimeoutError:
-                print(f"⏱️ Таймаут проверки сессии, перемещаем в broken_sessions")
-                await self.move_broken_session(client, "timeout")
+                    # УЛУЧШЕНИЕ: Инициализация ID сессии для отслеживания
+                    session_id = f"{me.id}_{me.phone}"
+                    if session_id not in self.session_processed_users:
+                        self.session_processed_users[session_id] = set()
 
-            except TypeNotFoundError as e:
-                print(f"❌ TypeNotFoundError - поврежденная сессия")
-                await self.move_broken_session(client, "type_error")
+            except (asyncio.TimeoutError, ConnectionError, RPCError, MsgIdDecreaseRetryError, Exception) as e:
+                error_reason = type(e).__name__
+                session_name = "unknown"
 
-            except RPCError as e:
-                if self.is_known_error(e):
-                    print(f"❌ Известная ошибка сессии: {e}")
-                    await self.move_broken_session(client, "known_error")
+                if hasattr(client, 'session') and hasattr(client.session, 'filename'):
+                    session_name = os.path.basename(client.session.filename)
+                elif hasattr(client, '_session_file'):
+                    session_name = os.path.basename(client._session_file)
+
+                if "socks5://" in str(e) or "proxy" in session_name.lower():
+                    error_reason = "proxy_error"
+                    print(f"❌ Сессия {session_name} с прокси не работает - перемещаем")
                 else:
-                    print(f"❌ RPC ошибка в сессии: {e}")
-                    await self.move_broken_session(client, "rpc_error")
+                    print(f"❌ Ошибка сессии {i + 1}: {str(e)[:50]} - перемещаем в broken_sessions")
 
-            except Exception as e:
-                print(f"❌ Общая ошибка в сессии: {e}")
-                await self.move_broken_session(client, "general_error")
+                await self.move_broken_session(client, error_reason, i)
+
+                if client in self.active_sessions:
+                    self.active_sessions.remove(client)
 
         self.active_sessions = healthy_sessions
-        print(f"📊 Осталось здоровых сессий: {len(healthy_sessions)}")
 
-    async def move_broken_session(self, client, reason="unknown"):
-        """Перемещение битой сессии с улучшенной обработкой"""
+        print("\n" + "=" * 60)
+        print(f"📊 РЕЗУЛЬТАТЫ ПРОВЕРКИ СЕССИЙ:")
+        print(f"   ✅ Рабочих сессий: {len(healthy_sessions)}")
+        print(f"   ❌ Битых сессий: {len(self.broken_sessions)}")
+        print("=" * 60)
+
+    async def move_broken_session(self, client, reason="unknown", session_index=None):
+        """Перемещение битой сессии"""
         try:
             session_file = None
-            
-            # Сначала безопасно отключаем клиент
+
             try:
                 if hasattr(client, 'is_connected') and client.is_connected():
-                    await asyncio.wait_for(client.disconnect(), timeout=5)
-            except (asyncio.TimeoutError, Exception) as e:
-                print(f"⚠️ Не удалось корректно отключить сессию: {e}")
-                # Принудительное закрытие соединения
-                if hasattr(client, '_connection'):
-                    client._connection = None
+                    await asyncio.wait_for(client.disconnect(), timeout=3)
+            except:
+                pass
 
-            # Ждем освобождения ресурсов
-            await asyncio.sleep(1)
+            if hasattr(client, '_connection'):
+                client._connection = None
 
-            # Пытаемся получить путь к файлу сессии
+            await asyncio.sleep(0.5)
+
             if hasattr(client, 'session') and hasattr(client.session, 'filename'):
                 session_file = client.session.filename
             elif hasattr(client, '_session_file'):
@@ -153,111 +185,102 @@ class AutoMassSender:
 
             if session_file and os.path.exists(session_file):
                 filename = os.path.basename(session_file)
-                dest_path = os.path.join("broken_sessions", f"{filename}.{reason}")
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                dest_path = os.path.join("broken_sessions", f"{filename}_{reason}_{timestamp}")
 
-                try:
-                    # Пробуем переместить файл
-                    shutil.move(session_file, dest_path)
-                    print(f"📁 Сессия {filename} перемещена в broken_sessions (причина: {reason})")
-                    self.broken_sessions.append(filename)
-
-                except (PermissionError, OSError) as e:
-                    # Если не получается переместить, пробуем скопировать
-                    print(f"⚠️ Не удалось переместить {filename}: {e}")
+                for attempt in range(3):
                     try:
-                        shutil.copy2(session_file, dest_path)
-                        print(f"📁 Сессия {filename} скопирована в broken_sessions")
-                        # Помечаем оригинальный файл для удаления позже
-                        try:
-                            os.rename(session_file, f"{session_file}.to_delete")
-                        except:
-                            pass
-                    except Exception as copy_error:
-                        print(f"⚠️ Не удалось скопировать сессию: {copy_error}")
-
+                        shutil.move(session_file, dest_path)
+                        print(f"   📁 Сессия {filename} перемещена в broken_sessions/{reason}")
+                        self.broken_sessions.append(filename)
+                        break
+                    except (PermissionError, OSError) as e:
+                        if attempt == 2:
+                            try:
+                                shutil.copy2(session_file, dest_path)
+                                print(f"   📁 Сессия {filename} скопирована в broken_sessions/{reason}")
+                                try:
+                                    os.rename(session_file, f"{session_file}.to_delete")
+                                except:
+                                    pass
+                            except:
+                                print(f"   ⚠️ Не удалось обработать сессию {filename}")
+                        else:
+                            await asyncio.sleep(1)
             else:
-                print("⚠️ Не удалось найти файл сессии для перемещения")
-        
-        except Exception as e:
-            print(f"❌ Ошибка при обработке битой сессии: {e}")
+                if session_index is not None:
+                    print(f"   ⚠️ Файл сессии {session_index + 1} не найден")
 
-        finally:
-            # Убеждаемся что клиент отключен
+        except Exception as e:
+            print(f"   ❌ Ошибка при обработке битой сессии: {str(e)[:50]}")
+
+    async def clean_numeric_ids(self):
+        """Очистка цифровых ID из кэша и target_users"""
+        print("\n🧹 Очистка цифровых ID...")
+        cleaned_count = 0
+
+        cache_file = "data/phone_cache.json"
+        if os.path.exists(cache_file):
             try:
-                if hasattr(client, 'disconnect'):
-                    await client.disconnect()
-            except:
-                pass
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    cache = json.load(f)
 
-    async def load_messages(self):
-        """Загружает сообщения из файла"""
-        messages_file = self.config.get("messages_file", "data/messages.txt")
-        self.messages_list = []
+                original_size = len(cache)
+                cleaned_cache = {
+                    phone: identifier
+                    for phone, identifier in cache.items()
+                    if identifier and (
+                            identifier.startswith('@') or
+                            not identifier.isdigit()
+                    )
+                }
 
-        try:
-            if os.path.exists(messages_file):
-                with open(messages_file, 'r', encoding='utf-8') as f:
-                    self.messages_list = [line.strip() for line in f if line.strip()]
+                if len(cleaned_cache) < original_size:
+                    with open(cache_file, 'w', encoding='utf-8') as f:
+                        json.dump(cleaned_cache, f, ensure_ascii=False, indent=2)
+                    cleaned_count = original_size - len(cleaned_cache)
+                    print(f"   📦 Удалено {cleaned_count} цифровых ID из кэша")
 
-            if not self.messages_list:
-                self.messages_list = ["Привет! Как дела?"]
+            except Exception as e:
+                print(f"   ⚠️ Ошибка очистки кэша: {e}")
 
-            print(f"📝 Загружено {len(self.messages_list)} сообщений")
-                        
-        except Exception as e:
-            print(f"❌ Ошибка загрузки сообщений: {e}")
-            self.messages_list = ["Привет! Как дела?"]
+        user_files = [
+            self.config.get("target_users_file", "data/target_users.txt"),
+            "data/available_users.txt",
+            "data/new_users.txt"
+        ]
 
-    def get_random_message(self):
-        """Возвращает случайное сообщение"""
-        if not self.messages_list:
-            return "Привет! Как дела?"
-        return random.choice(self.messages_list)
+        for file_path in user_files:
+            if os.path.exists(file_path):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        users = [line.strip() for line in f if line.strip()]
 
-    async def get_smart_message(self):
-        """
-        Возвращает AI сгенерированное уникальное сообщение
-        Если AI не работает - прекращаем рассылку (НЕТ захардкоженных!)
-        """
-        if not self.auto_responder or not self.auto_responder.ai_enabled:
-            raise Exception("❌ AI автоответчик не активен - рассылка прекращена для избежания банов!")
-        
-        try:
-            # Генерируем уникальное AI сообщение
-            ai_message = await self.auto_responder.generate_initial_message()
-            print(f"🤖 AI сгенерировал: {ai_message}")
-            return ai_message
-        
-        except Exception as e:
-            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА AI генерации: {e}")
-            raise Exception(f"❌ AI генерация сообщений недоступна - рассылка остановлена! Ошибка: {e}")
+                    original_count = len(users)
+                    filtered_users = [
+                        user for user in users
+                        if user.startswith('@') or not user.isdigit()
+                    ]
 
-    async def initialize_auto_responder(self):
-        """Инициализация автоответчика"""
-        print("🤖 Инициализация AI автоответчика...")
+                    if len(filtered_users) < original_count:
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            f.write('\n'.join(filtered_users))
+                        removed = original_count - len(filtered_users)
+                        print(f"   📝 Удалено {removed} цифровых ID из {os.path.basename(file_path)}")
+                        cleaned_count += removed
 
-        try:
-            # Инициализируем автоответчик с конфигурацией
-            self.auto_responder = init_auto_responder(self.config, self.session_manager)
-            
-            if self.auto_responder and self.auto_responder.ai_enabled:
-                print("✅ AI автоответчик успешно инициализирован")
-                
-                # Выводим диагностическую информацию
-                stats = self.auto_responder.get_stats()
-                print("\n📋 Лог инициализации автоответчика:")
-                for log_entry in stats.get('initialization_log', []):
-                    print(f"   {log_entry}")
-            else:
-                print("❌ AI автоответчик не активен")
+                except Exception as e:
+                    print(f"   ⚠️ Ошибка очистки {file_path}: {e}")
 
-        except Exception as e:
-            print(f"❌ Ошибка инициализации автоответчика: {e}")
-            import traceback
-            traceback.print_exc()
+        if cleaned_count > 0:
+            print(f"✅ Всего очищено цифровых ID: {cleaned_count}")
+        else:
+            print("   ✅ Цифровых ID не найдено")
+
+        return cleaned_count
 
     async def convert_phone_numbers(self):
-        """Конвертация номеров телефонов с использованием всех доступных сессий"""
+        """Конвертация с фильтрацией цифровых ID"""
         print("\n📱 ЭТАП 1: Конвертация номеров телефонов")
 
         phones_file = self.config.get("phone_numbers_file", "data/phone_numbers.txt")
@@ -277,7 +300,6 @@ class AutoMassSender:
             print("❌ Нет активных сессий для конвертации")
             return 0
 
-        # Создаем задачи для конвертации по сессиям
         tasks = []
         phones_per_session = len(phones) // len(self.active_sessions) + 1
 
@@ -287,60 +309,218 @@ class AutoMassSender:
             session_phones = phones[start_idx:end_idx]
 
             if session_phones:
-                task = self._convert_phones_batch(client, session_phones)
+                task = self._convert_phones_batch(client, session_phones, i)
                 tasks.append(task)
 
         print(f"📊 Распределение: {len(phones)} номеров на {len(self.active_sessions)} сессий")
 
-        # Запускаем все задачи параллельно
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         all_results = {}
         converted = []
         failed = []
+        numeric_ids_filtered = 0
 
-        # Обрабатываем результаты
         for result in results:
             if isinstance(result, Exception):
                 print(f"❌ Ошибка в задаче конвертации: {result}")
                 continue
 
-            for phone, username in result.items():
-                if username:
-                    converted.append(username)
-                    all_results[phone] = username
-            else:
-                    failed.append(phone)
-                    all_results[phone] = None
+            if isinstance(result, dict):
+                for phone, identifier in result.items():
+                    if identifier:
+                        if identifier.startswith('@'):
+                            converted.append(identifier)
+                            all_results[phone] = identifier
+                        elif not identifier.isdigit():
+                            converted.append(identifier)
+                            all_results[phone] = identifier
+                        else:
+                            numeric_ids_filtered += 1
+                            print(f"   🚫 Пропущен цифровой ID: {identifier}")
+                    else:
+                        failed.append(phone)
+                        all_results[phone] = None
 
-        # Сохраняем результаты
         if converted:
             await self.user_manager.add_new_users(converted)
             print(f"✅ Успешно сконвертировано: {len(converted)} номеров")
+
+        if numeric_ids_filtered > 0:
+            print(f"🚫 Отфильтровано цифровых ID: {numeric_ids_filtered}")
 
         if failed:
             await self.user_manager.save_users_async("data/failed_numbers.txt", failed)
             print(f"⚠️ Не удалось конвертировать: {len(failed)} номеров")
 
-        # Очищаем файл с номерами
         await self.user_manager.save_users_async(phones_file, [])
 
         return len(converted)
 
-    async def _convert_phones_batch(self, client, phones_list):
-        """Конвертация пакета номеров одной сессией"""
+    async def _convert_phones_batch(self, client, phones_list, session_index):
+        """Конвертация пакета с обработкой ошибок сессии"""
         try:
+            try:
+                me = await asyncio.wait_for(client.get_me(), timeout=5)
+                if not me:
+                    raise Exception("Сессия не отвечает")
+            except (MsgIdDecreaseRetryError, Exception) as e:
+                if isinstance(e, MsgIdDecreaseRetryError):
+                    print(f"⚠️ Сессия {session_index + 1} имеет внутренние проблемы Telegram")
+                    await asyncio.sleep(5)
+                else:
+                    print(f"❌ Сессия {session_index + 1} недоступна для конвертации")
+                    await self.move_broken_session(client, "convert_check_failed", session_index)
+                return {phone: None for phone in phones_list}
+
             converter = PhoneConverter(client)
             results = await converter.batch_convert(phones_list, max_concurrent=2)
+
+            if converter.stats.get('session_errors', 0) > 0:
+                print(f"⚠️ Сессия {session_index + 1} имеет ошибки, помечаем для проверки")
+
             return results
+
         except Exception as e:
-            print(f"❌ Ошибка конвертации пакета: {e}")
-            # Возвращаем словарь с неудачными результатами
+            print(f"❌ Ошибка конвертации пакета сессией {session_index + 1}: {e}")
             return {phone: None for phone in phones_list}
 
+    async def load_messages(self):
+        """Загружает сообщения из файла"""
+        messages_file = self.config.get("messages_file", "data/messages.txt")
+        self.messages_list = []
+
+        try:
+            if os.path.exists(messages_file):
+                with open(messages_file, 'r', encoding='utf-8') as f:
+                    self.messages_list = [line.strip() for line in f if line.strip()]
+
+            if not self.messages_list:
+                self.messages_list = ["Привет! Как дела?"]
+
+            print(f"📝 Загружено {len(self.messages_list)} сообщений")
+
+        except Exception as e:
+            print(f"❌ Ошибка загрузки сообщений: {e}")
+            self.messages_list = ["Привет! Как дела?"]
+
+    def get_random_message(self):
+        """Возвращает случайное сообщение"""
+        if not self.messages_list:
+            return "Привет! Как дела?"
+        return random.choice(self.messages_list)
+
+    async def get_smart_message(self):
+        """Возвращает AI сгенерированное уникальное сообщение"""
+        if not self.auto_responder or not self.auto_responder.ai_enabled:
+            raise Exception("❌ AI автоответчик не активен - рассылка прекращена для избежания банов!")
+
+        try:
+            ai_message = await self.auto_responder.generate_initial_message()
+            return ai_message
+        except Exception as e:
+            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА AI генерации: {e}")
+            raise Exception(f"❌ AI генерация сообщений недоступна - рассылка остановлена! Ошибка: {e}")
+    def load_processed_users_history(self):
+        """Загружает историю всех обработанных пользователей"""
+        try:
+            if os.path.exists(self.processed_users_file):
+                with open(self.processed_users_file, 'r', encoding='utf-8') as f:
+                    self.all_time_processed_users = json.load(f)
+                print(f"📚 Загружена история: {sum(len(users) for users in self.all_time_processed_users.values())} пользователей")
+        except Exception as e:
+            print(f"⚠️ Не удалось загрузить историю: {e}")
+            self.all_time_processed_users = {}
+    def save_processed_users_history(self):
+        """Сохраняет историю всех обработанных пользователей"""
+        try:
+            with open(self.processed_users_file, 'w', encoding='utf-8') as f:
+                json.dump(self.all_time_processed_users, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"⚠️ Не удалось сохранить историю: {e}")
+
+    async def send_messages_with_retry(self, sessions, users, session_messages, delay_ms, messages_per_account):
+        """Отправка сообщений с сохранением в постоянную историю"""
+        sent_count = 0
+        failed_users = []
+
+        for i, user in enumerate(users):
+            if not self.is_running:
+                break
+
+            session_index = i % len(sessions)
+            client = sessions[session_index]
+            message = session_messages[client]
+
+            try:
+                success = await self.try_send_message(client, user, message)
+
+                if success:
+                    sent_count += 1
+
+                    # Получаем ID сессии
+                    me = await client.get_me()
+                    session_id = f"{me.id}_{me.phone}"
+
+                    # ИСПРАВЛЕНИЕ: Добавляем в оба хранилища
+                    # В текущий цикл
+                    if session_id not in self.session_processed_users:
+                        self.session_processed_users[session_id] = set()
+                    self.session_processed_users[session_id].add(user)
+
+                    # В постоянное хранилище
+                    if session_id not in self.all_time_processed_users:
+                        self.all_time_processed_users[session_id] = []
+                    if user not in self.all_time_processed_users[session_id]:
+                        self.all_time_processed_users[session_id].append(user)
+
+                    # Сохраняем после каждых 50 сообщений
+                    if sent_count % 50 == 0:
+                        self.save_processed_users_history()
+                        print(f"📤 Отправлено {sent_count}/{len(users)} сообщений")
+                else:
+                    failed_users.append(user)
+
+            except Exception as e:
+                print(f"❌ Ошибка отправки пользователю {user}: {e}")
+                failed_users.append(user)
+
+            await asyncio.sleep(delay_ms / 1000)
+
+        # Сохраняем историю в конце
+        self.save_processed_users_history()
+        if failed_users:
+            await self.user_manager.save_users_async("data/failed_users.txt", failed_users)
+            print(f"⚠️ {len(failed_users)} пользователей не получили сообщения")
+
+        return sent_count
+    async def initialize_auto_responder(self):
+        """Инициализация автоответчика"""
+        print("🤖 Инициализация AI автоответчика...")
+
+        try:
+            self.auto_responder = init_auto_responder(self.config, self.session_manager)
+
+            if self.auto_responder and self.auto_responder.ai_enabled:
+                print("✅ AI автоответчик успешно инициализирован")
+
+                stats = self.auto_responder.get_stats()
+                print("\n📋 Лог инициализации автоответчика:")
+                for log_entry in stats.get('initialization_log', []):
+                    print(f"   {log_entry}")
+            else:
+                print("❌ AI автоответчик не активен")
+
+        except Exception as e:
+            print(f"❌ Ошибка инициализации автоответчика: {e}")
+            import traceback
+            traceback.print_exc()
+
     async def send_messages_to_users(self):
-        """Отправка сообщений пользователям"""
+        """Отправка с генерацией уникальных сообщений для каждой сессии"""
         print("\n✉️ ЭТАП 2: Отправка рассылки")
+
+        await self.clean_numeric_ids()
 
         moved = await self.user_manager.move_new_to_target()
         if moved > 0:
@@ -348,6 +528,16 @@ class AutoMassSender:
 
         users_data = await self.user_manager.load_all_users()
         available_users = users_data.get("available", [])
+
+        filtered_users = [
+            user for user in available_users
+            if user.startswith('@') or not user.isdigit()
+        ]
+
+        if len(filtered_users) < len(available_users):
+            removed = len(available_users) - len(filtered_users)
+            print(f"🚫 Отфильтровано {removed} цифровых ID из списка рассылки")
+            available_users = filtered_users
 
         if not available_users:
             print("⚠️ Нет пользователей для рассылки")
@@ -366,54 +556,42 @@ class AutoMassSender:
             return 0
 
         print(f"📊 Сообщений на аккаунт: {distribution.get('actual_per_account')}")
-
-        # 🔧 ИСПРАВЛЕНИЕ: Генерируем сообщения под количество пользователей, а не сессий
-        print(f"📝 Генерируем {len(available_users)} уникальных AI сообщений...")
-        unique_messages = []
-        for i in range(len(available_users)):
-            try:
-                message = await self.get_smart_message()
-                unique_messages.append(message)
-                print(f"🤖 AI сгенерировал #{i+1}: {message[:50]}...")
-            except Exception as e:
-                if "AI генерация сообщений недоступна" in str(e) or "AI автоответчик не активен" in str(e):
-                    print(f"🛑 {str(e)}")
-                    print("🛡️ Рассылка остановлена для защиты от банов!")
-                    return 0
-                print(f"❌ Ошибка генерации сообщения #{i+1}: {e}")
-                # Используем fallback сообщение
-                unique_messages.append(self.get_random_message())
-
-        # Проверяем что есть сообщения для отправки
-        if not unique_messages:
-            print("❌ Не удалось сгенерировать ни одного сообщения")
-            return 0
+        print(f"📝 Генерируем {len(self.active_sessions)} уникальных AI сообщений (по одному на сессию)...")
 
         session_messages = {}
         working_sessions = []
 
-        # Проверяем сессии и назначаем им сообщения циклично
-        message_index = 0
-        for client in self.active_sessions:
+        for i, client in enumerate(self.active_sessions):
             try:
                 me = await asyncio.wait_for(client.get_me(), timeout=10)
-                # Циклично назначаем сообщения (если сессий больше чем сообщений)
-                session_messages[client] = unique_messages[message_index % len(unique_messages)]
-                print(f"💬 {me.first_name}: использует сообщение #{(message_index % len(unique_messages)) + 1}")
-                working_sessions.append(client)
-                message_index += 1
-            except Exception as e:
-                print(f"❌ Сессия не отвечает: {e}")
-                await self.move_broken_session(client, "send_check_failed")
+
+                try:
+                    unique_message = await self.get_smart_message()
+                    session_messages[client] = unique_message
+                    print(f"🤖 Сессия #{i + 1} ({me.first_name}): {unique_message[:50]}...")
+                    working_sessions.append(client)
+                except Exception as e:
+                    if "AI генерация сообщений недоступна" in str(e) or "AI автоответчик не активен" in str(e):
+                        print(f"🛑 {str(e)}")
+                        print("🛡️ Рассылка остановлена для защиты от банов!")
+                        return 0
+                    session_messages[client] = self.get_random_message()
+                    working_sessions.append(client)
+
+            except (MsgIdDecreaseRetryError, Exception) as e:
+                if isinstance(e, MsgIdDecreaseRetryError):
+                    print(f"⚠️ Сессия {i + 1} имеет внутренние проблемы Telegram, пропускаем")
+                else:
+                    print(f"❌ Сессия {i + 1} не отвечает: {e}")
+                    await self.move_broken_session(client, "send_check_failed")
 
         if not working_sessions:
             print("❌ Нет рабочих сессий для отправки")
             return 0
 
-        # Обновляем список активных сессий
         self.active_sessions = working_sessions
 
-        sent_count = await self.message_handler.send_messages(
+        sent_count = await self.send_messages_with_retry(
             working_sessions,
             available_users,
             session_messages,
@@ -430,6 +608,146 @@ class AutoMassSender:
 
         return sent_count
 
+    async def send_messages_with_retry(self, sessions, users, session_messages, delay_ms, messages_per_account):
+        """Отправка сообщений с повторными попытками и переключением сессий"""
+        sent_count = 0
+        failed_users = []
+
+        for i, user in enumerate(users):
+            if not self.is_running:
+                break
+
+            session_index = i % len(sessions)
+            client = sessions[session_index]
+            message = session_messages[client]
+
+            try:
+                success = await self.try_send_message(client, user, message)
+
+                if success:
+                    sent_count += 1
+
+                    # ИСПРАВЛЕНИЕ: Правильное отслеживание пользователей
+                    me = await client.get_me()
+                    session_id = f"{me.id}_{me.phone}"
+
+                    if session_id not in self.session_processed_users:
+                        self.session_processed_users[session_id] = set()
+
+                    # Сохраняем как username так и другие возможные идентификаторы
+                    self.session_processed_users[session_id].add(user)
+
+                    # Также устанавливаем атрибут на клиенте для обратной совместимости
+                    if not hasattr(client, 'processed_users'):
+                        client.processed_users = set()
+                    client.processed_users.add(user)
+
+                    if sent_count % 10 == 0:
+                        print(f"📤 Отправлено {sent_count}/{len(users)} сообщений")
+                else:
+                    failed_users.append(user)
+
+            except Exception as e:
+                print(f"❌ Ошибка отправки пользователю {user}: {e}")
+                failed_users.append(user)
+
+            await asyncio.sleep(delay_ms / 1000)
+
+        if failed_users:
+            await self.user_manager.save_users_async("data/failed_users.txt", failed_users)
+            print(f"⚠️ {len(failed_users)} пользователей не получили сообщения")
+
+        return sent_count
+
+    async def try_send_message(self, client, user, message, max_retries=3):
+        """Попытка отправки сообщения с обработкой ошибок"""
+        for attempt in range(max_retries):
+            try:
+                try:
+                    me = await asyncio.wait_for(client.get_me(), timeout=5)
+                    if not me:
+                        raise Exception("Сессия не отвечает")
+                except Exception as e:
+                    print(f"❌ Сессия не отвечает: {e}")
+                    return False
+
+                await client.send_message(user, message)
+                print(f"✅ [{me.first_name}] -> {user}: отправлено")
+                return True
+
+            except FloodWaitError as e:
+                wait_time = e.seconds
+                print(f"⏳ FloodWait: ожидание {wait_time} секунд для сессии")
+                await asyncio.sleep(wait_time)
+                continue
+
+            except RPCError as e:
+                error_str = str(e).lower()
+
+                if "too many requests" in error_str and "sendmessagerequest" in error_str:
+                    print(f"⚠️ Too many requests для сессии, пробуем другую сессию")
+
+                    alternative_session = await self.find_alternative_session(client)
+                    if alternative_session:
+                        print(f"🔄 Переключаемся на альтернативную сессию")
+                        try:
+                            me_alt = await alternative_session.get_me()
+                            await alternative_session.send_message(user, message)
+                            print(f"✅ [{me_alt.first_name}] -> {user}: отправлено через альтернативную сессию")
+
+                            # ИСПРАВЛЕНИЕ: Добавляем в отслеживание для альтернативной сессии
+                            session_id_alt = f"{me_alt.id}_{me_alt.phone}"
+                            if session_id_alt not in self.session_processed_users:
+                                self.session_processed_users[session_id_alt] = set()
+                            self.session_processed_users[session_id_alt].add(user)
+
+                            if hasattr(alternative_session, 'processed_users'):
+                                alternative_session.processed_users.add(user)
+                            else:
+                                alternative_session.processed_users = {user}
+
+                            return True
+                        except Exception as alt_e:
+                            print(f"❌ Ошибка альтернативной сессии: {alt_e}")
+                            continue
+                    else:
+                        print(f"❌ Нет альтернативных сессий для переключения")
+                        return False
+
+                elif self.is_known_error(e):
+                    print(f"⚠️ Известная ошибка RPC: {e}")
+                    if attempt == max_retries - 1:
+                        return False
+                    await asyncio.sleep(5)
+                    continue
+                else:
+                    print(f"❌ Неизвестная ошибка RPC: {e}")
+                    if attempt == max_retries - 1:
+                        return False
+                    await asyncio.sleep(3)
+                    continue
+
+            except Exception as e:
+                print(f"❌ Общая ошибка отправки: {e}")
+                if attempt == max_retries - 1:
+                    return False
+                await asyncio.sleep(2)
+                continue
+
+        return False
+
+    async def find_alternative_session(self, excluded_session):
+        """Поиск альтернативной рабочей сессии"""
+        for session in self.active_sessions:
+            if session != excluded_session:
+                try:
+                    me = await asyncio.wait_for(session.get_me(), timeout=5)
+                    if me:
+                        return session
+                except:
+                    continue
+        return None
+
     async def check_messages_from_processed(self):
         """Проверка сообщений от обработанных пользователей"""
         print("\n👀 ЭТАП 3: Проверка сообщений от processed_users")
@@ -443,23 +761,27 @@ class AutoMassSender:
 
         print(f"📊 Проверяем сообщения от {len(processed_users)} пользователей")
 
+        # Обновляем информацию о отслеживании
         for client in self.active_sessions:
             try:
-                if not hasattr(client, 'sent_users'):
-                    client.sent_users = set()
-
-                for user in processed_users:
-                    try:
-                        entity = await asyncio.wait_for(client.get_entity(user), timeout=10)
-                        client.sent_users.add(entity.id)
-                    except Exception:
-                        continue
-            
                 me = await client.get_me()
-                print(f"✅ {me.first_name}: отслеживает {len(client.sent_users)} пользователей")
+                session_id = f"{me.id}_{me.phone}"
 
-            except Exception as e:
-                print(f"❌ Ошибка настройки проверки: {e}")
+                if session_id in self.session_processed_users:
+                    tracked = len(self.session_processed_users[session_id])
+                    if tracked > 0:
+                        print(f"✅ {me.first_name}: отслеживает {tracked} пользователей из текущей рассылки")
+
+                # Также синхронизируем с атрибутом клиента
+                if hasattr(client, 'processed_users') and len(client.processed_users) > 0:
+                    print(f"   📌 В атрибуте клиента: {len(client.processed_users)} пользователей")
+
+            except (MsgIdDecreaseRetryError, Exception) as e:
+                if isinstance(e, MsgIdDecreaseRetryError):
+                    print(f"⚠️ Внутренние проблемы Telegram при проверке")
+                    await asyncio.sleep(5)
+                else:
+                    print(f"❌ Ошибка настройки проверки: {e}")
 
     async def setup_message_listeners(self):
         """Настройка прослушки входящих сообщений"""
@@ -467,120 +789,218 @@ class AutoMassSender:
 
         sessions_to_remove = []
 
-        for client in self.active_sessions:
+        for client in self.active_sessions[:]:
             try:
+                try:
+                    me = await asyncio.wait_for(client.get_me(), timeout=5)
+                    if not me:
+                        raise Exception("Сессия не отвечает")
+
+                    # Устанавливаем ID сессии для отслеживания
+                    client._session_id = f"{me.id}_{me.phone}"
+
+                except (MsgIdDecreaseRetryError, Exception) as e:
+                    if isinstance(e, MsgIdDecreaseRetryError):
+                        print(f"⚠️ Внутренние проблемы Telegram для сессии, пропускаем прослушку")
+                        continue
+                    print(f"❌ Сессия недоступна для прослушки: {e}")
+                    sessions_to_remove.append(client)
+                    continue
+
                 # Удаляем старые обработчики если есть
                 if hasattr(client, '_message_handlers'):
                     for handler in client._message_handlers:
-                        client.remove_event_handler(handler)
+                        try:
+                            client.remove_event_handler(handler)
+                        except:
+                            pass
+                    client._message_handlers = []
 
                 # Создаем новый обработчик
-                async def create_handler(current_client):
-                    async def handler(event):
-                        try:
-                            await self.handle_incoming_message(current_client, event)
-                        except Exception as e:
-                            if self.is_known_error(e):
-                                print(f"⚠️ Известная ошибка в обработчике: {e}")
-                            else:
-                                print(f"❌ Ошибка в обработчике сообщений: {e}")
+                @client.on(events.NewMessage(incoming=True))
+                async def handler(event, current_client=client):
+                    try:
+                        await self.handle_incoming_message(current_client, event)
+                    except (TypeNotFoundError, RPCError, MsgIdDecreaseRetryError) as e:
+                        if isinstance(e, MsgIdDecreaseRetryError):
+                            print(f"⚠️ Внутренние проблемы Telegram в обработчике")
+                            return
+                        if self.is_known_error(e):
+                            print(f"⚠️ Известная ошибка в обработчике, удаляем сессию: {e}")
+                            await self.move_broken_session(current_client, "handler_error")
+                            if current_client in self.active_sessions:
+                                self.active_sessions.remove(current_client)
+                        else:
+                            print(f"❌ Ошибка в обработчике сообщений: {e}")
+                    except Exception as e:
+                        print(f"❌ Общая ошибка в обработчике: {e}")
 
-                    return handler
-
-                handler = await create_handler(client)
-                client.add_event_handler(handler, events.NewMessage(incoming=True))
-
-                # Сохраняем ссылку на обработчик
                 if not hasattr(client, '_message_handlers'):
                     client._message_handlers = []
                 client._message_handlers.append(handler)
 
-                me = await client.get_me()
                 print(f"✅ {me.first_name}: прослушка активна")
 
-            except (TypeNotFoundError, RPCError) as e:
-                if self.is_known_error(e):
+            except (TypeNotFoundError, RPCError, MsgIdDecreaseRetryError) as e:
+                if isinstance(e, MsgIdDecreaseRetryError):
+                    print(f"⚠️ Внутренние проблемы Telegram, пропускаем сессию")
+                elif self.is_known_error(e):
                     print(f"⚠️ Известная ошибка сессии, помечаем для удаления")
                     sessions_to_remove.append(client)
                 else:
                     print(f"❌ Ошибка настройки прослушки: {e}")
+            except Exception as e:
+                print(f"❌ Общая ошибка настройки прослушки: {e}")
+                sessions_to_remove.append(client)
 
-        # Удаляем битые сессии после цикла
         for client in sessions_to_remove:
             await self.move_broken_session(client, "listener_setup_failed")
             if client in self.active_sessions:
                 self.active_sessions.remove(client)
 
     async def handle_incoming_message(self, client, event):
-        """Обработка входящего сообщения"""
+        """ИСПРАВЛЕННАЯ обработка входящего сообщения"""
         try:
-            sender = await event.get_sender()
-            if not sender or not hasattr(client, 'sent_users'):
+            # Проверка работоспособности сессии
+            try:
+                me = await asyncio.wait_for(client.get_me(), timeout=3)
+                if not me:
+                    raise Exception("Сессия не отвечает")
+            except (MsgIdDecreaseRetryError, Exception) as e:
+                if isinstance(e, MsgIdDecreaseRetryError):
+                    print(f"⚠️ Внутренние проблемы Telegram при обработке сообщения")
+                    return
+                print(f"❌ Сессия умерла во время обработки сообщения: {e}")
+                await self.move_broken_session(client, "died_during_processing")
+                if client in self.active_sessions:
+                    self.active_sessions.remove(client)
                 return
 
-            if sender.id not in client.sent_users:
+            sender = await event.get_sender()
+            if not sender:
+                return
+
+            # Получаем ID сессии
+            session_id = getattr(client, '_session_id', None)
+            if not session_id:
+                session_id = f"{me.id}_{me.phone}"
+                client._session_id = session_id
+
+            # Определяем идентификатор отправителя
+            sender_identifiers = []
+            if sender.username:
+                sender_identifiers.append(f"@{sender.username}")
+                sender_identifiers.append(sender.username)
+            sender_identifiers.append(str(sender.id))
+
+            # ИСПРАВЛЕНИЕ: Проверяем в постоянной истории
+            is_processed_user = False
+
+            # Проверяем в истории всех времен
+            if session_id in self.all_time_processed_users:
+                all_time_users = self.all_time_processed_users[session_id]
+                for identifier in sender_identifiers:
+                    if identifier in all_time_users:
+                        is_processed_user = True
+                        break
+
+            # Также проверяем в текущем цикле
+            if not is_processed_user and session_id in self.session_processed_users:
+                current_users = self.session_processed_users[session_id]
+                for identifier in sender_identifiers:
+                    if identifier in current_users:
+                        is_processed_user = True
+                        break
+
+            # Если сообщение не от обработанного пользователя - игнорируем
+            if not is_processed_user:
                 return
 
             text = event.raw_text
-            me = await client.get_me()
             timestamp = datetime.now().strftime("%H:%M:%S")
 
-            print(f"\n[{timestamp}] 📩 {sender.first_name} -> {me.first_name}: {text}")
+            print(f"\n[{timestamp}] 📩 {sender.first_name} -> {me.first_name}: {text[:50]}...")
 
+            # Отправляем уведомление
             if notification_bot:
                 account_info = {'phone': me.phone or 'Unknown', 'name': me.first_name or 'Unknown'}
                 sender_info = {'name': sender.first_name or 'Unknown', 'username': sender.username or 'unknown'}
                 asyncio.create_task(notification_bot.send_notification(account_info, sender_info, text))
 
+            # Обрабатываем автоответ
             if self.auto_responder:
-                asyncio.create_task(self.handle_auto_response(client, sender, text))
+                await self.process_auto_response(client, sender, text)
 
-            # Удаляем сообщение из чата
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Удаляем сообщение У СЕССИИ, а не у пользователя
+            # Получаем диалог с пользователем
             try:
-                await event.message.delete(revoke=False)
-            except:
-                pass
+                dialogs = await client.get_dialogs()
+                for dialog in dialogs:
+                    if dialog.entity.id == sender.id:
+                        # Удаляем ВСЕ сообщения в диалоге с этим пользователем
+                        async for message in client.iter_messages(dialog.entity, limit=None):
+                            try:
+                                await message.delete()
+                            except Exception as del_e:
+                                print(f"⚠️ Не удалось удалить сообщение: {del_e}")
+                        print(f"   🗑️ Все сообщения в диалоге с {sender.first_name} удалены")
+                        break
+            except Exception as e:
+                print(f"   ⚠️ Ошибка при удалении сообщений: {e}")
 
-        except (TypeNotFoundError, RPCError) as e:
+        except (TypeNotFoundError, RPCError, MsgIdDecreaseRetryError) as e:
+            if isinstance(e, MsgIdDecreaseRetryError):
+                print(f"⚠️ Внутренние проблемы Telegram")
+                return
             if self.is_known_error(e):
-                print(f"⚠️ Пропускаем известную ошибку: {e}")
+                print(f"⚠️ Известная ошибка, удаляем сессию: {e}")
+                await self.move_broken_session(client, "known_error_in_handler")
+                if client in self.active_sessions:
+                    self.active_sessions.remove(client)
             else:
                 print(f"❌ Ошибка обработки сообщения: {e}")
 
         except Exception as e:
-            print(f"❌ Ошибка обработки сообщения: {e}")
+            print(f"❌ Общая ошибка обработки сообщения: {e}")
 
-    async def handle_auto_response(self, client, sender, text):
+    async def process_auto_response(self, client, sender, message_text):
         """Обработка автоответа"""
         try:
+            if not self.auto_responder:
+                return
+
+            user_id = sender.username if sender.username else str(sender.id)
+            if sender.username:
+                user_id = f"@{sender.username}"
+
             response = await self.auto_responder.handle_message(
-                str(sender.id),
-                text,
-                phone=getattr(sender, 'phone', None),
-                username=getattr(sender, 'username', None),
-                first_name=getattr(sender, 'first_name', None)
+                user_id=user_id,
+                message=message_text,
+                phone=sender.phone if hasattr(sender, 'phone') else None,
+                username=sender.username,
+                first_name=sender.first_name
             )
 
             if response:
-                # 🔧 ИСПРАВЛЕНИЕ: Добавляем индикатор "печатает..." для реалистичности
+                await asyncio.sleep(random.uniform(3, 8))
+
                 try:
-                    await client.send_read_acknowledge(sender.id)  # Отмечаем как прочитанное
-                    await client(SetTypingRequest(
-                        peer=sender.id, 
-                        action=SendMessageTypingAction()
-                    ))
-                    await asyncio.sleep(1.5)  # Имитируем время набора текста
+                    await client(SetTypingRequest(sender, SendMessageTypingAction()))
+                    await asyncio.sleep(random.uniform(2, 4))
                 except:
-                    pass  # Игнорируем ошибки typing action
-                
-                await client.send_message(sender.id, response)
-                print(f"🤖 Автоответ -> {sender.first_name}: {response[:50]}...")
+                    pass
+
+                await client.send_message(sender, response)
+
+                me = await client.get_me()
+                print(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] 🤖 {me.first_name} -> {sender.first_name}: {response[:50]}...")
 
         except Exception as e:
-            print(f"❌ Ошибка автоответчика: {e}")
+            print(f"❌ Ошибка автоответа: {e}")
 
     async def main_loop(self):
-        """Основной цикл программы"""
+        """Основной цикл БЕЗ очистки истории"""
         print("\n🔄 Запуск основного цикла...")
         self.is_running = True
 
@@ -590,12 +1010,18 @@ class AutoMassSender:
                 print(f"⏰ НАЧАЛО ЦИКЛА - {datetime.now().strftime('%H:%M:%S')}")
                 print(f"{'=' * 60}")
 
-                # Проверяем работоспособность сессий
+                # ИСПРАВЛЕНИЕ: Очищаем только текущий цикл, НЕ историю
+                self.session_processed_users.clear()
+
+                # Показываем статистику истории
+                total_in_history = sum(len(users) for users in self.all_time_processed_users.values())
+                print(f"📚 В истории отслеживания: {total_in_history} связей пользователь-сессия")
+
                 await self.check_sessions_health()
 
                 if not self.active_sessions:
                     print("❌ Нет рабочих сессий, пропускаем цикл")
-                    await asyncio.sleep(300)  # Ждем 5 минут и пробуем снова
+                    await asyncio.sleep(300)
                     continue
 
                 converted = await self.convert_phone_numbers()
@@ -607,15 +1033,8 @@ class AutoMassSender:
                 print(f"   • Конвертировано: {converted} номеров")
                 print(f"   • Отправлено: {sent} сообщений")
                 print(f"   • Рабочих сессий: {len(self.active_sessions)}")
-                print(f"   • Нерабочих сессий: {len(self.broken_sessions)}")
-
-                if notification_bot and (converted > 0 or sent > 0):
-                    await notification_bot.send_security_notification(
-                        {"phone": "System", "name": "AutoMassSender"},
-                        {"name": "Cycle", "username": "system"},
-                        f"Цикл завершен. Конвертировано: {converted}, Отправлено: {sent}, Сессий: {len(self.active_sessions)}",
-                        "✅ ЦИКЛ ЗАВЕРШЕН"
-                    )
+                print(f"   • Новых пользователей в истории: {sent}")
+                print(f"   • Всего в истории: {total_in_history + sent}")
 
                 print(f"\n⏳ Ожидание {self.check_interval // 60} минут до следующего цикла...")
                 await asyncio.sleep(self.check_interval)
@@ -635,15 +1054,14 @@ class AutoMassSender:
         if not success:
             print("❌ Не удалось инициализировать систему")
             return
-            
-            print("\n" + "=" * 60)
+
+        print("\n" + "=" * 60)
         print("🚀 АВТОМАТИЧЕСКИЙ MASS SENDER ЗАПУЩЕН")
         print(f"⏱️ Проверка каждые {self.check_interval // 60} минут")
         print("🛑 Для остановки нажмите Ctrl+C")
         print("=" * 60)
 
         try:
-            # Запускаем основной цикл
             await self.main_loop()
         except KeyboardInterrupt:
             print("\n🛑 Остановка по запросу пользователя")
@@ -657,17 +1075,15 @@ class AutoMassSender:
         print("\n📴 Завершение работы...")
         self.is_running = False
 
-        # Отключаем все сессии
         for client in self.active_sessions:
             try:
-                # Удаляем обработчики событий
                 if hasattr(client, '_message_handlers'):
                     for handler in client._message_handlers:
                         try:
                             client.remove_event_handler(handler)
                         except:
                             pass
-        
+
                 await client.disconnect()
             except:
                 pass
@@ -697,7 +1113,8 @@ async def main():
         print("\n1. 🚀 Запустить автоматический режим")
         print("2. 🧪 Тест одного цикла")
         print("3. 🧹 Очистить broken_sessions")
-        print("4. ❌ Выход")
+        print("4. 📊 Показать статистику битых сессий")
+        print("5. ❌ Выход")
         print("-" * 40)
 
         choice = input("Выбор: ").strip()
@@ -716,23 +1133,73 @@ async def main():
                 print("✅ Тестовый цикл завершен")
                 await sender.shutdown()
         elif choice == "3":
-            # Очистка broken_sessions
             broken_dir = "broken_sessions"
             if os.path.exists(broken_dir):
                 try:
+                    files = os.listdir(broken_dir)
+                    print(f"🗑️ Найдено {len(files)} битых сессий")
                     shutil.rmtree(broken_dir)
                     os.makedirs(broken_dir, exist_ok=True)
-                    print("🧹 Папка broken_sessions очищена")
+                    print("✅ Папка broken_sessions очищена")
                 except Exception as e:
                     print(f"❌ Ошибка очистки: {e}")
             else:
                 print("⚠️ Папка broken_sessions не существует")
         elif choice == "4":
+            broken_dir = "broken_sessions"
+            if os.path.exists(broken_dir):
+                files = os.listdir(broken_dir)
+                if files:
+                    print("\n📊 БИТЫЕ СЕССИИ:")
+                    for file in files:
+                        parts = file.split('_')
+                        if len(parts) >= 2:
+                            reason = parts[-2] if len(parts) > 2 else "unknown"
+                            print(f"   • {parts[0]}: {reason}")
+                    print(f"\n   Всего: {len(files)} файлов")
+                else:
+                    print("✅ Нет битых сессий")
+            else:
+                print("✅ Папка broken_sessions не существует")
+        elif choice == "5":
             print("👋 До свидания!")
             break
         else:
             print("❌ Неверный выбор")
 
+    async def cleanup_all_dialogs(self):
+        """Удаляет ВСЕ сообщения из всех диалогов у всех сессий"""
+        print("\n🗑️ ОЧИСТКА ВСЕХ ДИАЛОГОВ...")
+
+        for client in self.active_sessions:
+            try:
+                me = await client.get_me()
+                print(f"\n📱 Очистка сессии {me.first_name}...")
+
+                dialogs = await client.get_dialogs()
+                for dialog in dialogs:
+                    if dialog.is_user:  # Только личные чаты
+                        try:
+                            # Удаляем все сообщения в диалоге
+                            deleted_count = 0
+                            async for message in client.iter_messages(dialog.entity, limit=None):
+                                try:
+                                    await message.delete()
+                                    deleted_count += 1
+                                except:
+                                    pass
+
+                            if deleted_count > 0:
+                                print(f"   ✅ Удалено {deleted_count} сообщений из диалога с {dialog.name}")
+                        except Exception as e:
+                            print(f"   ⚠️ Ошибка очистки диалога с {dialog.name}: {e}")
+
+                print(f"✅ Сессия {me.first_name} очищена")
+
+            except Exception as e:
+                print(f"❌ Ошибка очистки сессии: {e}")
+
+        print("✅ Очистка всех диалогов завершена")
 
 if __name__ == "__main__":
     try:

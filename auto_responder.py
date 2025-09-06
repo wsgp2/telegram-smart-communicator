@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AUTO RESPONDER - Автоматический опросник покупателей автомобилей
-Исправленная версия с поддержкой JSON конфигурации
+Упрощенная версия без сложной БД интеграции
 """
 
 import asyncio
@@ -15,10 +15,9 @@ from typing import Dict, Optional, Deque, Any, List
 import httpx
 from openai import AsyncOpenAI
 from phone_converter import PhoneConverter
-# Настройка логгера
+
 logger = logging.getLogger('auto_responder')
 
-# Путь к файлу конфигурации по умолчанию
 DEFAULT_CONFIG_PATH = "config/auto_responder_config.json"
 
 
@@ -42,7 +41,7 @@ class Config:
         ai_config = config_dict.get("auto_responder", {}).get("ai", {})
         self.ai_enabled = ai_config.get("enabled", False)
         self.ai_api_key = ai_config.get("api_key", "")
-        self.ai_model = ai_config.get("model", "gpt-4.1")
+        self.ai_model = ai_config.get("model", "gpt-4o-mini")
         self.ai_max_tokens = ai_config.get("max_tokens", 150)
 
         # Proxy Configuration
@@ -90,10 +89,10 @@ class Config:
                 "ai": {
                     "enabled": True,
                     "api_key": "",
-                    "model": "gpt-4.1",
+                    "model": "gpt-4o-mini",
                     "max_tokens": 150,
                     "proxy": {
-                        "enabled": True,
+                        "enabled": False,
                         "url": ""
                     }
                 }
@@ -271,8 +270,9 @@ CAR_INTEREST_PROMPTS = {
 
 # ---------------- Контекст беседы ----------------
 class ConversationContext:
-    def __init__(self, user_id: str, config: Config):
+    def __init__(self, user_id: str, config: Config, account_phone: str = None):
         self.user_id = user_id
+        self.account_phone = account_phone  # Номер телефона аккаунта, который ведет диалог
         self.message_history: Deque[str] = deque(maxlen=AUTO_RESPONDER_CONFIG["max_history"])
         self.questions_asked: int = 0
         self.last_message_time: datetime = datetime.utcnow()
@@ -289,7 +289,6 @@ class ConversationContext:
 # ---------------- Автоответчик ----------------
 class AutoResponder:
     def __init__(self, config: Optional[Config] = None):
-        """Инициализация автоответчика"""
         self.config = config if config else Config()
         self.conversations: Dict[str, ConversationContext] = {}
         self.lock = asyncio.Lock()
@@ -300,6 +299,13 @@ class AutoResponder:
         self.session_manager = None
         self.phone_converter = None
         self.phone_cache = {}
+
+        # Файл с номерами телефонов жертв
+        self.victim_numbers_file = "data/victim_number"
+        self.victim_numbers_cache = {}
+
+        # Карта номеров телефонов аккаунтов
+        self.session_phone_map = {}
 
         # Статистика
         self.stats = {
@@ -312,138 +318,74 @@ class AutoResponder:
 
         self.initialization_log = []
 
+        # Загружаем номера жертв
+        self._load_victim_numbers()
+
+        # Инициализируем OpenAI
         self._init_openai_client()
 
-    def _init_openai_client(self):
-        self.initialization_log.append("Начало инициализации OpenAI клиента")
+    # 🔧 Новый метод
+    def get_phone_from_cache(self, identifier: str) -> Optional[str]:
+        """Возвращает телефон по user_id/username из локального кэша или PhoneConverter"""
+        if not identifier:
+            return None
 
-        if not self.config.ai_enabled:
-            self.initialization_log.append("❌ AI отключен в конфигурации (ai.enabled = False)")
-            logger.warning("AI disabled in configuration")
-            return
+        # Сначала проверяем локальный кэш
+        if identifier in self.phone_cache:
+            return self.phone_cache[identifier]
 
-        if not self.config.ai_api_key:
-            self.initialization_log.append("❌ API ключ не предоставлен")
-            logger.warning("AI API key not provided")
+        # Если есть phone_converter — пробуем взять оттуда
+        if self.phone_converter:
+            try:
+                phone = self.phone_converter.get_from_cache(identifier)
+                if phone:
+                    self.phone_cache[identifier] = phone
+                    return phone
+            except Exception as e:
+                logger.error(f"Ошибка доступа к PhoneConverter cache: {e}")
+
+        return None
+
+    def _load_victim_numbers(self):
+        """Загружает номера телефонов из файла victim numbers"""
+        if not os.path.exists(self.victim_numbers_file):
+            logger.warning(f"Файл с номерами жертв не найден: {self.victim_numbers_file}")
             return
 
         try:
-            # Проверяем валидность API ключа
-            if not self.config.ai_api_key.startswith("sk-"):
-                self.initialization_log.append(
-                    f"❌ Неверный формат API ключа: начинается с '{self.config.ai_api_key[:5]}...'")
-                logger.error("Invalid OpenAI API key format")
-                return
+            with open(self.victim_numbers_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or ':' not in line:
+                        continue
 
-            if len(self.config.ai_api_key) < 20:
-                self.initialization_log.append(f"❌ API ключ слишком короткий: {len(self.config.ai_api_key)} символов")
-                logger.error("API key too short")
-                return
+                    parts = line.split(':', 1)
+                    if len(parts) == 2:
+                        username, phone = parts
+                        username = username.strip()
+                        phone = phone.strip()
 
-            self.initialization_log.append(f"✅ API ключ корректного формата: {self.config.ai_api_key[:10]}...")
-            self.initialization_log.append(f"🔧 Модель: {self.config.ai_model}")
+                        if username.startswith('@'):
+                            username = username[1:]
 
-            # Базовые параметры клиента
-            client_kwargs = {"api_key": self.config.ai_api_key}
+                        # Сохраняем в кэш (теперь self.victim_numbers_cache уже инициализирован)
+                        self.victim_numbers_cache[username] = self.format_phone(phone)
+                        logger.debug(f"Загружен номер из файла: {username} -> {phone}")
 
-            # Настройка прокси если включена
-            if self.config.ai_proxy_enabled and self.config.ai_proxy_url:
-                try:
-                    proxy_url = self._parse_proxy_url(self.config.ai_proxy_url)
-
-                    # Устанавливаем переменную окружения для прокси
-                    import os
-                    os.environ['HTTP_PROXY'] = proxy_url
-                    os.environ['HTTPS_PROXY'] = proxy_url
-
-                    self.initialization_log.append(f"🌐 Используется прокси: {proxy_url}")
-                    logger.info(f"Using proxy for OpenAI: {proxy_url}")
-
-                except Exception as e:
-                    self.initialization_log.append(f"⚠️ Ошибка настройки прокси: {e}")
-                    logger.error(f"Failed to setup proxy: {e}")
-
-            self.client = AsyncOpenAI(**client_kwargs)
-            self.initialization_log.append("✅ OpenAI клиент создан")
-            logger.info("OpenAI client initialized successfully")
+            logger.info(f"Загружено {len(self.victim_numbers_cache)} номеров из файла {self.victim_numbers_file}")
 
         except Exception as e:
-            error_msg = f"Ошибка создания OpenAI клиента: {e}"
-            self.initialization_log.append(f"❌ {error_msg}")
-            logger.error(error_msg)
-            self.client = None
+            logger.error(f"Ошибка загрузки файла с номерами: {e}")
 
-        self.enabled = self.config.auto_responder_enabled
-        self.ai_enabled = self.config.ai_enabled and self.client is not None
-
-        if self.ai_enabled:
-            self.initialization_log.append("✅ AI автоответчик полностью активен")
-        else:
-            self.initialization_log.append("❌ AI автоответчик неактивен - будут использоваться fallback ответы")
-    def get_initialization_log(self) -> List[str]:
-        """Возвращает лог инициализации для диагностики"""
-        return self.initialization_log.copy()
-
-    def _parse_proxy_url(self, proxy_url: str) -> str:
-        """Парсинг и форматирование URL прокси"""
-        if not proxy_url.startswith(("http://", "https://", "socks5://")):
-            proxy_url = "http://" + proxy_url
-        return proxy_url
-
-    def set_session_manager(self, session_manager):
-        """Установка менеджера сессий для отправки сообщений"""
-        self.session_manager = session_manager
-
-    def get_context(self, user_id: str) -> ConversationContext:
-        if user_id not in self.conversations:
-            self.conversations[user_id] = ConversationContext(user_id, self.config)
-        return self.conversations[user_id]
-
-    def is_car_interest(self, message: str) -> bool:
-        """Проверяет, содержит ли сообщение интерес к автомобилям (fallback метод)"""
-        if not message:
-            return False
-
-        message_lower = message.lower()
-        return any(keyword.lower() in message_lower for keyword in AUTO_RESPONDER_CONFIG["keywords_car_interest"])
-
-    def set_phone_converter(self, phone_converter: PhoneConverter):
-        """Устанавливает экземпляр PhoneConverter для доступа к кэшу телефонов"""
-        self.phone_converter = phone_converter
-        # Копируем кэш телефонов при установке
-        if phone_converter and hasattr(phone_converter, 'cache'):
-            self.phone_cache = phone_converter.cache.copy()
-            logger.info(f"Загружен кэш телефонов: {len(self.phone_cache)} записей")
-
-    def update_phone_cache(self, new_cache: Dict[str, str]):
-        """Обновляет локальный кэш телефонов"""
-        self.phone_cache.update(new_cache)
-        logger.info(f"Кэш телефонов обновлен: {len(self.phone_cache)} записей")
-
-    def get_phone_from_cache(self, user_id: str) -> Optional[str]:
-        """Получает номер телефона из кэша по user_id (username или id)"""
-        if not self.phone_cache:
+    def get_phone_from_victim_file(self, username: str) -> Optional[str]:
+        """Получает номер телефона из файла victim numbers по username"""
+        if not username:
             return None
 
-        # Ищем номер телефона в кэше по user_id
-        for phone, identifier in self.phone_cache.items():
-            if identifier and (identifier == user_id or
-                               (isinstance(identifier, str) and identifier.lower() == user_id.lower()) or
-                               (user_id.startswith('@') and identifier == user_id[1:]) or
-                               (identifier.startswith('@') and user_id == identifier[1:])):
-                logger.info(f"Найден номер телефона в кэше: {phone} -> {identifier}")
-                return phone
+        # Нормализуем username (убираем @ если есть)
+        clean_username = username[1:] if username.startswith('@') else username
 
-        logger.debug(f"Номер телефона для {user_id} не найден в кэше")
-        return None
-
-    def get_username_from_phone(self, phone: str) -> Optional[str]:
-        """Получает username/id из кэша по номеру телефона"""
-        if not self.phone_cache:
-            return None
-
-        formatted_phone = self.format_phone(phone)
-        return self.phone_cache.get(formatted_phone)
+        return self.victim_numbers_cache.get(clean_username)
 
     def format_phone(self, phone: str) -> str:
         """Форматирует номер телефона в международный формат"""
@@ -464,6 +406,7 @@ class AutoResponder:
             return '+' + digits
         else:
             return digits
+
     def is_positive_response(self, message: str) -> bool:
         """Проверяет, является ли ответ положительным"""
         if not message:
@@ -482,14 +425,12 @@ class AutoResponder:
         """AI анализ интереса к покупке автомобиля"""
         if not self.ai_enabled:
             return self.is_positive_response(message)
-        
+
         try:
-            # Формируем контекст из истории
-            # Конвертируем deque в список для слайсинга
             history_list = list(conversation_history) if conversation_history else []
             history_context = "\n".join(history_list[-5:]) if history_list else ""
             full_context = f"История диалога:\n{history_context}\n\nПоследнее сообщение: {message}"
-            
+
             response = await self.client.chat.completions.create(
                 model=self.config.ai_model,
                 messages=[
@@ -499,11 +440,11 @@ class AutoResponder:
                 max_tokens=10,
                 temperature=0.1
             )
-            
+
             result = response.choices[0].message.content.strip().upper()
             logger.info(f"AI анализ интереса вернул: '{result}'")
             return "ЗАИНТЕРЕСОВАН" in result
-            
+
         except Exception as e:
             logger.error(f"Ошибка AI анализа интереса: {e}")
             return self.is_positive_response(message)
@@ -512,14 +453,14 @@ class AutoResponder:
         """AI извлечение марки автомобиля"""
         if not self.ai_enabled:
             return self._extract_brand_keywords(message)
-        
+
         try:
             # Формируем контекст из истории
             # Конвертируем deque в список для слайсинга
             history_list = list(conversation_history) if conversation_history else []
             history_context = "\n".join(history_list[-5:]) if history_list else ""
             full_context = f"История диалога:\n{history_context}\n\nПоследнее сообщение: {message}"
-            
+
             response = await self.client.chat.completions.create(
                 model=self.config.ai_model,
                 messages=[
@@ -529,11 +470,11 @@ class AutoResponder:
                 max_tokens=20,
                 temperature=0.1
             )
-            
+
             result = response.choices[0].message.content.strip()
             logger.info(f"AI извлечение марки вернуло: '{result}'")
             return result if result != "НЕТ" else None
-            
+
         except Exception as e:
             logger.error(f"Ошибка AI извлечения марки: {e}")
             return self._extract_brand_keywords(message)
@@ -542,14 +483,14 @@ class AutoResponder:
         """AI извлечение бюджета"""
         if not self.ai_enabled:
             return self._extract_budget_keywords(message)
-        
+
         try:
             # Формируем контекст из истории
             # Конвертируем deque в список для слайсинга
             history_list = list(conversation_history) if conversation_history else []
             history_context = "\n".join(history_list[-5:]) if history_list else ""
             full_context = f"История диалога:\n{history_context}\n\nПоследнее сообщение: {message}"
-            
+
             response = await self.client.chat.completions.create(
                 model=self.config.ai_model,
                 messages=[
@@ -559,11 +500,11 @@ class AutoResponder:
                 max_tokens=30,
                 temperature=0.1
             )
-            
+
             result = response.choices[0].message.content.strip()
             logger.info(f"AI извлечение бюджета вернуло: '{result}'")
             return result if result != "НЕТ" else None
-            
+
         except Exception as e:
             logger.error(f"Ошибка AI извлечения бюджета: {e}")
             return self._extract_budget_keywords(message)
@@ -577,7 +518,7 @@ class AutoResponder:
                   "тойота", "хонда", "бмв", "мерседес", "ауди", "фольксваген",
                   "киа", "хендай", "ниссан", "мазда", "субару", "лексус",
                   "лада", "рено", "пежо", "форд", "шевроле", "шкода"]
-        
+
         for brand in brands:
             if brand in message_lower:
                 return brand.title()
@@ -586,7 +527,7 @@ class AutoResponder:
     def _extract_budget_keywords(self, message: str) -> Optional[str]:
         """Fallback извлечение бюджета по ключевым словам"""
         message_lower = message.lower()
-        
+
         # Паттерны для поиска бюджета
         budget_patterns = [
             r'(\d+[\s]*(?:млн|миллион[ов]*|миллиард[ов]*|м))',
@@ -596,13 +537,13 @@ class AutoResponder:
             r'(от[\s]*\d+[\s]*до[\s]*\d+)',
             r'(около[\s]*\d+)'
         ]
-        
+
         text = re.sub(r"\s+", " ", message_lower.replace(',', '.')).strip()
         for pattern in budget_patterns:
             matches = re.findall(pattern, text)
             if matches:
                 return matches[0]
-        
+
         return None
 
     async def generate_initial_message(self) -> str:
@@ -616,7 +557,7 @@ class AutoResponder:
             ]
             import random
             return random.choice(default_messages)
-        
+
         try:
             response = await self.client.chat.completions.create(
                 model=self.config.ai_model,
@@ -626,11 +567,11 @@ class AutoResponder:
                 max_tokens=50,
                 temperature=0.8  # Больше креативности для уникальности
             )
-            
+
             generated_message = response.choices[0].message.content.strip()
             logger.info(f"AI сгенерировал сообщение: {generated_message}")
             return generated_message
-            
+
         except Exception as e:
             logger.error(f"Ошибка генерации AI сообщения: {e}")
             # Fallback
@@ -648,13 +589,13 @@ class AutoResponder:
         try:
             # Формируем историю диалога для контекста
             conversation_messages = []
-            
+
             # Добавляем системный промпт
             conversation_messages.append({
-                "role": "system", 
+                "role": "system",
                 "content": CAR_INTEREST_PROMPTS["conversation"]
             })
-            
+
             # Добавляем контекст о клиенте если есть
             context_info = []
             if context.brand:
@@ -663,28 +604,28 @@ class AutoResponder:
                 context_info.append(f"Бюджет: {context.budget}")
             if context.interested is not None:
                 context_info.append(f"Интерес: {'заинтересован' if context.interested else 'не заинтересован'}")
-            
+
             if context_info:
                 conversation_messages.append({
                     "role": "system",
                     "content": f"Информация о клиенте: {', '.join(context_info)}"
                 })
-            
+
             # Добавляем историю сообщений (последние 10 для контекста)
             if context.message_history and len(context.message_history) > 0:
                 # Конвертируем deque в список и берем последние сообщения
                 history_list = list(context.message_history)
                 history_to_include = history_list[-10:] if len(history_list) > 10 else history_list
-                
+
                 for i, msg in enumerate(history_to_include):
                     role = "user" if i % 2 == 0 else "assistant"
-                    # 🔧 ИСПРАВЛЕНИЕ: Убираем префикс [AI]: из сообщений для AI
+                    # Убираем префикс [AI]: из сообщений для AI
                     clean_msg = msg.replace("[AI]: ", "") if msg.startswith("[AI]: ") else msg
                     conversation_messages.append({
                         "role": role,
                         "content": clean_msg
                     })
-            
+
             # Добавляем текущее сообщение пользователя (если его еще нет)
             current_message_exists = any(msg["content"] == user_message for msg in conversation_messages)
             if not current_message_exists:
@@ -702,23 +643,23 @@ class AutoResponder:
             )
             answer = response.choices[0].message.content.strip()
             logger.info(f"AI response received: {answer[:50]}...")
-            
-            # 🔧 ИСПРАВЛЕНИЕ: Добавляем ответ AI в историю для сохранения контекста
+
+            # Добавляем ответ AI в историю для сохранения контекста
             if context:
                 context.message_history.append(f"[AI]: {answer}")
                 logger.debug(f"AI ответ добавлен в историю. Всего сообщений: {len(context.message_history)}")
-            
+
             return answer
-            
+
         except Exception as e:
             error_msg = f"Ошибка генерации AI ответа: {e}"
             logger.error(error_msg)
             fallback_response = self._get_fallback_response(context)
-            
-            # 🔧 ИСПРАВЛЕНИЕ: Добавляем fallback ответ в историю
+
+            # Добавляем fallback ответ в историю
             if context:
                 context.message_history.append(f"[AI]: {fallback_response}")
-            
+
             return fallback_response
 
     def _get_fallback_response(self, context: ConversationContext) -> str:
@@ -736,7 +677,7 @@ class AutoResponder:
 
     async def analyze_response(self, context: ConversationContext, message: str):
         """AI анализ ответа пользователя на интерес, марку и бюджет"""
-        
+
         # 1. Анализ интереса к покупке (если еще не определен)
         if context.interested is None:
             logger.info(f"Анализируем интерес для сообщения: '{message}'")
@@ -761,31 +702,46 @@ class AutoResponder:
                 logger.info(f"AI извлек бюджет: {budget}")
 
     async def handle_message(self, user_id: str, message: str, phone: Optional[str] = None,
-                             username: Optional[str] = None, first_name: Optional[str] = None) -> Optional[str]:
-        """Основной метод обработки сообщений"""
+                             username: Optional[str] = None, first_name: Optional[str] = None,
+                             session_client=None) -> Optional[str]:
+
         if not self.enabled:
             logger.debug("AutoResponder disabled")
             return None
 
+        # Получаем номер телефона аккаунта из карты
+        account_phone = None
+        if session_client:
+            account_phone = await self.get_account_phone_for_session(session_client)
+
         async with self.lock:
-            context = self.get_context(user_id)
+            context = self.get_context(user_id, account_phone)
             context.last_message_time = datetime.utcnow()
 
             if phone:
                 context.phone = self._normalize_phone(phone)
                 logger.info(f"Телефон передан напрямую: {context.phone}")
 
+            elif username and not context.phone:
+                # Пробуем найти номер в файле victim numbers
+                victim_phone = self.get_phone_from_victim_file(username)
+                if victim_phone:
+                    context.phone = self._normalize_phone(victim_phone)
+                    logger.info(f"Телефон найден в файле victim numbers: {context.phone}")
+
+                # Если не нашли в файле, ищем в кэше phone_converter
+                elif self.phone_converter:
+                    cached_phone = self.get_phone_from_cache(f"@{username}")
+                    if cached_phone:
+                        context.phone = self._normalize_phone(cached_phone)
+                        logger.info(f"Телефон найден в кэше phone_converter: {context.phone}")
+
             elif not context.phone:
+                # Ищем в кэше по user_id
                 cached_phone = self.get_phone_from_cache(user_id)
                 if cached_phone:
                     context.phone = self._normalize_phone(cached_phone)
-                    logger.info(f"Телефон найден в кэше: {context.phone}")
-
-            elif username and not context.phone:
-                cached_phone = self.get_phone_from_cache(f"@{username}")
-                if cached_phone:
-                    context.phone = self._normalize_phone(cached_phone)
-                    logger.info(f"Телефон найден в кэше по username: {context.phone}")
+                    logger.info(f"Телефон найден в кэше по user_id: {context.phone}")
 
             if username:
                 context.username = username
@@ -808,17 +764,17 @@ class AutoResponder:
         # Обновляем счетчики
         self.stats['questions_asked'] += 1
 
-        # 🔧 ИСПРАВЛЕНИЕ: Если есть марка И бюджет - автоматически считаем заинтересованным
+        # Если есть марка И бюджет - автоматически считаем заинтересованным
         if context.brand and context.budget and context.interested is None:
             context.interested = True
-            logger.info(f"🎯 Автоматически установлен интерес=True (есть марка и бюджет)")
+            logger.info(f"Автоматически установлен интерес=True (есть марка и бюджет)")
 
         # Проверяем условия завершения диалога
         has_both_info = context.brand and context.budget and context.interested
         reached_max_questions = context.questions_asked >= self.config.max_questions
         not_interested = context.interested is False
 
-        # 🔧 ОТЛАДКА: Детальное логирование проверки завершения
+        # Детальное логирование проверки завершения
         logger.info(f"Проверка завершения диалога пользователя {user_id}:")
         logger.info(f"  - Марка: {context.brand}")
         logger.info(f"  - Бюджет: {context.budget}")
@@ -828,14 +784,15 @@ class AutoResponder:
 
         if has_both_info or reached_max_questions or not_interested:
             context.status = "completed"
-            logger.info(f"🎯 ДИАЛОГ ЗАВЕРШЕН! Причина: has_both_info={has_both_info}, max_questions={reached_max_questions}, not_interested={not_interested}")
-            
+            logger.info(
+                f"ДИАЛОГ ЗАВЕРШЕН! Причина: has_both_info={has_both_info}, max_questions={reached_max_questions}, not_interested={not_interested}")
+
             # Отправляем уведомление менеджерам если есть полная информация
             if has_both_info:
                 self.stats['leads_completed'] += 1
-                await self._send_lead_notification(context)
-                logger.info(f"✅ Лид завершен: {context.brand}, {context.budget}")
-            
+                await self._send_lead_notification(context, account_phone)
+                logger.info(f"Лид завершен: {context.brand}, {context.budget}")
+
             # AI генерирует финальный ответ
             response = await self.generate_ai_response(context, message)
             return response
@@ -877,46 +834,50 @@ class AutoResponder:
             else:
                 return False
 
-    async def _send_lead_notification(self, context: ConversationContext):
-            """Отправляет уведомление о завершенном лиде"""
-            try:
-                from notification_bot import notification_bot
+    async def _send_lead_notification(self, context: ConversationContext, account_phone: str = None):
+        """Отправляет уведомление о завершенном лиде"""
+        try:
+            from notification_bot import notification_bot
 
-                if not notification_bot:
-                    return
+            if not notification_bot:
+                return
 
-                # Ищем username в кэше если не указан
-                username_display = f"@{context.username}" if context.username else "Без username"
-                if not context.username and context.phone:
-                    cached_username = self.get_username_from_phone(context.phone)
-                    if cached_username:
-                        username_display = cached_username if cached_username.startswith('@') else f"@{cached_username}"
+            # Ищем username в кэше если не указан
+            username_display = f"@{context.username}" if context.username else "Без username"
+            if not context.username and context.phone:
+                cached_username = self.get_username_from_phone(context.phone)
+                if cached_username:
+                    username_display = cached_username if cached_username.startswith('@') else f"@{cached_username}"
 
-                name_display = context.first_name or "Неизвестно"
-                phone_display = context.phone or "Неизвестно"
-                brand_display = context.brand or "❓ Не выяснено"
-                budget_display = context.budget or "❓ Не указан"
+            name_display = context.first_name or "Неизвестно"
+            phone_display = context.phone or "Неизвестно"
+            brand_display = context.brand or "❓ Не выяснено"
+            budget_display = context.budget or "❓ Не указан"
+            account_display = account_phone or "Неизвестный аккаунт"
 
-                notification_text = f"""🚗 АВТОЛИД - ПОКУПАТЕЛЬ АВТОМОБИЛЯ
+            notification_text = f"""🚗 АВТОЛИД - ПОКУПАТЕЛЬ АВТОМОБИЛЯ
 
-    👤 <b>Клиент:</b> {name_display} ({username_display})
-    📱 <b>Телефон:</b> <code>{phone_display}</code>
+👤 <b>Клиент:</b> {name_display} ({username_display})
+📱 <b>Телефон:</b> <code>{phone_display}</code>
 
-    🚙 <b>Марка:</b> {brand_display}
-    💰 <b>Бюджет:</b> {budget_display}
+🚙 <b>Марка:</b> {brand_display}
+💰 <b>Бюджет:</b> {budget_display}
 
-    📊 <b>Вопросов задано:</b> {context.questions_asked}
-    ⏰ <b>Время:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}"""
+📞 <b>Аккаунт:</b> {account_display}
+📊 <b>Вопросов задано:</b> {context.questions_asked}
+⏰ <b>Время:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}"""
 
-                await notification_bot.send_security_notification(
-                    {'phone': 'AutoResponder', 'name': 'Система опроса'},
-                    {'name': name_display, 'username': context.username or 'unknown'},
-                    notification_text,
-                    "🚗 АВТОЛИД"
-                )
+            await notification_bot.send_security_notification(
+                {'phone': account_display, 'name': 'Система опроса'},
+                {'name': name_display, 'username': context.username or 'unknown'},
+                notification_text,
+                "🚗 АВТОЛИД"
+            )
 
-            except ImportError:
-                pass
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления: {e}")
 
     async def cleanup_sessions(self):
         """Очищает старые сессии"""
@@ -934,7 +895,7 @@ class AutoResponder:
 
     def get_stats(self) -> Dict[str, Any]:
         """Возвращает статистику"""
-        return {
+        base_stats = {
             'active_conversations': len(self.conversations),
             'total_conversations_started': self.stats['conversations_started'],
             'total_questions_asked': self.stats['questions_asked'],
@@ -942,8 +903,12 @@ class AutoResponder:
             'cars_identified': self.stats['cars_identified'],
             'budgets_collected': self.stats['budgets_collected'],
             'ai_enabled': self.ai_enabled,
-            'initialization_log': self.get_initialization_log()
+            'initialization_log': self.get_initialization_log(),
+            'phone_cache_size': len(self.phone_cache),
+            'session_phone_map_size': len(self.session_phone_map)
         }
+
+        return base_stats
 
 
 # ---------------- Глобальный экземпляр ----------------
@@ -951,14 +916,6 @@ auto_responder_instance: Optional[AutoResponder] = None
 
 
 def init_auto_responder(config_dict: Optional[dict] = None, session_manager=None, phone_converter=None):
-    """
-    Инициализация автоответчика
-
-    Args:
-        config_dict: Словарь с конфигурацией (опционально)
-        session_manager: Менеджер сессий для отправки сообщений
-        phone_converter: Экземпляр PhoneConverter для доступа к кэшу
-    """
     global auto_responder_instance
 
     if config_dict:
@@ -996,6 +953,8 @@ def create_default_config_file(path: Optional[str] = None):
 
 
 if __name__ == "__main__":
+    import sys
+
     if not os.path.exists(DEFAULT_CONFIG_PATH):
         create_default_config_file()
 
@@ -1008,3 +967,12 @@ if __name__ == "__main__":
         print("\n📋 Лог инициализации:")
         for log_entry in stats['initialization_log']:
             print(f"   {log_entry}")
+
+        if stats.get('active_accounts'):
+            print(f"\n📊 Статистика базы данных:")
+            print(f"   Активных аккаунтов: {stats.get('active_accounts', 0)}")
+            print(f"   AI-аккаунтов: {stats.get('ai_enabled_accounts', 0)}")
+            print(f"   Завершенных диалогов: {stats.get('completed_conversations', 0)}")
+            print(f"   Лидов с полной информацией: {stats.get('leads_with_full_info', 0)}")
+    else:
+        print("❌ Не удалось инициализировать автоответчик")

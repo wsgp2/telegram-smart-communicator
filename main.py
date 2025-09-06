@@ -35,15 +35,19 @@ class AutoMassSender:
         self.all_time_processed_users = {}
         self.session_processed_users = {}
         self.processed_users_file = "data/all_processed_users.json"
+        self.victim_phones_file = "data/victim_phones.txt"
+        self.session_phone_map = {}  # Карта ID аккаунта -> номер телефона
         self.is_running = False
         self.is_sending = False
         self.check_interval = 10 * 60
         self.auto_responder = None
         self.messages_list = []
         self.first_run = True
-        self.load_processed_users_history()
 
-        # УЛУЧШЕНИЕ: Словарь для отслеживания обработанных пользователей по сессиям
+        self.load_processed_users_history()
+        self.load_victim_phones()
+
+        # Словарь для отслеживания обработанных пользователей по сессиям
         self.session_processed_users = {}
 
         self.known_error_patterns = [
@@ -58,8 +62,49 @@ class AutoMassSender:
             "msgiddecrease",
             "internal issues",
             "too many requests",
-            "sendmessagerequest"
+            "sendmessagerequest",
+            "timestamp outdated",
+            "persistenttimestamp",
+            "connection reset",
+            "server closed"  ,
+            "GeneralProxyError: Socket error:"
         ]
+
+    def load_victim_phones(self):
+        """Загружает номера телефонов жертв из файла"""
+        self.victim_phones = set()
+        try:
+            if os.path.exists(self.victim_phones_file):
+                with open(self.victim_phones_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            self.victim_phones.add(line)
+                print(f"📱 Загружено {len(self.victim_phones)} номеров жертв")
+        except Exception as e:
+            print(f"⚠️ Ошибка загрузки номеров жертв: {e}")
+            self.victim_phones = set()
+
+    def save_victim_phones(self):
+        """Сохраняет номера телефонов жертв в файл"""
+        try:
+            os.makedirs("data", exist_ok=True)
+            with open(self.victim_phones_file, 'w', encoding='utf-8') as f:
+                for phone in sorted(self.victim_phones):
+                    f.write(f"{phone}\n")
+            print(f"💾 Сохранено {len(self.victim_phones)} номеров жертв")
+        except Exception as e:
+            print(f"❌ Ошибка сохранения номеров жертв: {e}")
+
+    def add_victim_phone(self, phone):
+        """Добавляет номер телефона жертвы"""
+        if phone:
+            self.victim_phones.add(phone)
+            self.save_victim_phones()
+
+
+
+
 
     async def initialize(self):
         """Полная инициализация системы"""
@@ -110,7 +155,7 @@ class AutoMassSender:
         return any(pattern in error_str for pattern in self.known_error_patterns)
 
     async def check_sessions_health(self):
-        """Проверка работоспособности сессий с автоматическим перемещением"""
+        """Проверка работоспособности сессий с сохранением номеров телефонов"""
         print("🔍 Проверка работоспособности сессий...")
 
         healthy_sessions = []
@@ -126,15 +171,24 @@ class AutoMassSender:
                 me = await asyncio.wait_for(client.get_me(), timeout=check_timeout)
                 if me:
                     healthy_sessions.append(client)
-                    phone_display = getattr(me, 'phone', 'unknown')
-                    print(f"✅ Сессия {phone_display} работоспособна                    ")
 
-                    # УЛУЧШЕНИЕ: Инициализация ID сессии для отслеживания
+                    # Получаем ID аккаунта и номер телефона
+                    account_id = str(me.id)
+                    phone_display = getattr(me, 'phone', 'unknown')
+
+                    # Форматируем номер телефона
+
+                    name_display = getattr(me, 'first_name', 'unknown')
+                    username_display = getattr(me, 'username', name_display)
+
+                    print(f"✅ Сессия {name_display} ({phone_display}) работоспособна                    ")
+
+                    # Инициализация ID сессии для отслеживания
                     session_id = f"{me.id}_{me.phone}"
                     if session_id not in self.session_processed_users:
                         self.session_processed_users[session_id] = set()
 
-            except (asyncio.TimeoutError, ConnectionError, RPCError, MsgIdDecreaseRetryError, Exception) as e:
+            except (asyncio.TimeoutError, ConnectionError, RPCError, Exception) as e:
                 error_reason = type(e).__name__
                 session_name = "unknown"
 
@@ -280,7 +334,7 @@ class AutoMassSender:
         return cleaned_count
 
     async def convert_phone_numbers(self):
-        """Конвертация с фильтрацией цифровых ID"""
+        """Конвертация с фильтрацией цифровых ID и сохранением успешных результатов"""
         print("\n📱 ЭТАП 1: Конвертация номеров телефонов")
 
         phones_file = self.config.get("phone_numbers_file", "data/phone_numbers.txt")
@@ -321,6 +375,9 @@ class AutoMassSender:
         failed = []
         numeric_ids_filtered = 0
 
+        # Файл для сохранения успешных конвертаций
+        successful_conversions_file = "data/successful_conversions.txt"
+
         for result in results:
             if isinstance(result, Exception):
                 print(f"❌ Ошибка в задаче конвертации: {result}")
@@ -332,9 +389,13 @@ class AutoMassSender:
                         if identifier.startswith('@'):
                             converted.append(identifier)
                             all_results[phone] = identifier
+                            # Сохраняем успешную конвертацию
+                            self._save_successful_conversion(phone, identifier, successful_conversions_file)
                         elif not identifier.isdigit():
                             converted.append(identifier)
                             all_results[phone] = identifier
+                            # Сохраняем успешную конвертацию (даже без @)
+                            self._save_successful_conversion(phone, identifier, successful_conversions_file)
                         else:
                             numeric_ids_filtered += 1
                             print(f"   🚫 Пропущен цифровой ID: {identifier}")
@@ -355,7 +416,19 @@ class AutoMassSender:
 
         await self.user_manager.save_users_async(phones_file, [])
 
+        print(f"📝 Успешные конвертации сохранены в {successful_conversions_file}")
+
         return len(converted)
+
+    def _save_successful_conversion(self, phone, username, filename):
+        """Сохраняет успешную конвертацию в файл"""
+        try:
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            with open(filename, 'a', encoding='utf-8') as f:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                f.write(f"{phone}:{username}\n")
+        except Exception as e:
+            print(f"⚠️ Ошибка сохранения конвертации: {e}")
 
     async def _convert_phones_batch(self, client, phones_list, session_index):
         """Конвертация пакета с обработкой ошибок сессии"""
@@ -364,13 +437,9 @@ class AutoMassSender:
                 me = await asyncio.wait_for(client.get_me(), timeout=5)
                 if not me:
                     raise Exception("Сессия не отвечает")
-            except (MsgIdDecreaseRetryError, Exception) as e:
-                if isinstance(e, MsgIdDecreaseRetryError):
-                    print(f"⚠️ Сессия {session_index + 1} имеет внутренние проблемы Telegram")
-                    await asyncio.sleep(5)
-                else:
-                    print(f"❌ Сессия {session_index + 1} недоступна для конвертации")
-                    await self.move_broken_session(client, "convert_check_failed", session_index)
+            except Exception as e:
+                print(f"❌ Сессия {session_index + 1} недоступна для конвертации")
+                await self.move_broken_session(client, "convert_check_failed", session_index)
                 return {phone: None for phone in phones_list}
 
             converter = PhoneConverter(client)
@@ -421,16 +490,19 @@ class AutoMassSender:
         except Exception as e:
             print(f"❌ КРИТИЧЕСКАЯ ОШИБКА AI генерации: {e}")
             raise Exception(f"❌ AI генерация сообщений недоступна - рассылка остановлена! Ошибка: {e}")
+
     def load_processed_users_history(self):
         """Загружает историю всех обработанных пользователей"""
         try:
             if os.path.exists(self.processed_users_file):
                 with open(self.processed_users_file, 'r', encoding='utf-8') as f:
                     self.all_time_processed_users = json.load(f)
-                print(f"📚 Загружена история: {sum(len(users) for users in self.all_time_processed_users.values())} пользователей")
+                print(
+                    f"📚 Загружена история: {sum(len(users) for users in self.all_time_processed_users.values())} пользователей")
         except Exception as e:
             print(f"⚠️ Не удалось загрузить историю: {e}")
             self.all_time_processed_users = {}
+
     def save_processed_users_history(self):
         """Сохраняет историю всех обработанных пользователей"""
         try:
@@ -438,83 +510,6 @@ class AutoMassSender:
                 json.dump(self.all_time_processed_users, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"⚠️ Не удалось сохранить историю: {e}")
-
-    async def send_messages_with_retry(self, sessions, users, session_messages, delay_ms, messages_per_account):
-        """Отправка сообщений с сохранением в постоянную историю"""
-        sent_count = 0
-        failed_users = []
-
-        for i, user in enumerate(users):
-            if not self.is_running:
-                break
-
-            session_index = i % len(sessions)
-            client = sessions[session_index]
-            message = session_messages[client]
-
-            try:
-                success = await self.try_send_message(client, user, message)
-
-                if success:
-                    sent_count += 1
-
-                    # Получаем ID сессии
-                    me = await client.get_me()
-                    session_id = f"{me.id}_{me.phone}"
-
-                    # ИСПРАВЛЕНИЕ: Добавляем в оба хранилища
-                    # В текущий цикл
-                    if session_id not in self.session_processed_users:
-                        self.session_processed_users[session_id] = set()
-                    self.session_processed_users[session_id].add(user)
-
-                    # В постоянное хранилище
-                    if session_id not in self.all_time_processed_users:
-                        self.all_time_processed_users[session_id] = []
-                    if user not in self.all_time_processed_users[session_id]:
-                        self.all_time_processed_users[session_id].append(user)
-
-                    # Сохраняем после каждых 50 сообщений
-                    if sent_count % 50 == 0:
-                        self.save_processed_users_history()
-                        print(f"📤 Отправлено {sent_count}/{len(users)} сообщений")
-                else:
-                    failed_users.append(user)
-
-            except Exception as e:
-                print(f"❌ Ошибка отправки пользователю {user}: {e}")
-                failed_users.append(user)
-
-            await asyncio.sleep(delay_ms / 1000)
-
-        # Сохраняем историю в конце
-        self.save_processed_users_history()
-        if failed_users:
-            await self.user_manager.save_users_async("data/failed_users.txt", failed_users)
-            print(f"⚠️ {len(failed_users)} пользователей не получили сообщения")
-
-        return sent_count
-    async def initialize_auto_responder(self):
-        """Инициализация автоответчика"""
-        print("🤖 Инициализация AI автоответчика...")
-
-        try:
-            self.auto_responder = init_auto_responder(self.config, self.session_manager)
-
-            if self.auto_responder and self.auto_responder.ai_enabled:
-                print("✅ AI автоответчик успешно инициализирован")
-
-                stats = self.auto_responder.get_stats()
-                print("\n📋 Лог инициализации автоответчика:")
-                for log_entry in stats.get('initialization_log', []):
-                    print(f"   {log_entry}")
-            else:
-                print("❌ AI автоответчик не активен")
-
-        except Exception as e:
-            print(f"❌ Ошибка инициализации автоответчика: {e}")
-            import traceback
-            traceback.print_exc()
 
     async def send_messages_to_users(self):
         """Отправка с генерацией уникальных сообщений для каждой сессии"""
@@ -578,12 +573,9 @@ class AutoMassSender:
                     session_messages[client] = self.get_random_message()
                     working_sessions.append(client)
 
-            except (MsgIdDecreaseRetryError, Exception) as e:
-                if isinstance(e, MsgIdDecreaseRetryError):
-                    print(f"⚠️ Сессия {i + 1} имеет внутренние проблемы Telegram, пропускаем")
-                else:
-                    print(f"❌ Сессия {i + 1} не отвечает: {e}")
-                    await self.move_broken_session(client, "send_check_failed")
+            except Exception as e:
+                print(f"❌ Сессия {i + 1} не отвечает: {e}")
+                await self.move_broken_session(client, "send_check_failed")
 
         if not working_sessions:
             print("❌ Нет рабочих сессий для отправки")
@@ -609,7 +601,7 @@ class AutoMassSender:
         return sent_count
 
     async def send_messages_with_retry(self, sessions, users, session_messages, delay_ms, messages_per_account):
-        """Отправка сообщений с повторными попытками и переключением сессий"""
+        """Отправка сообщений с сохранением в постоянную историю"""
         sent_count = 0
         failed_users = []
 
@@ -627,22 +619,24 @@ class AutoMassSender:
                 if success:
                     sent_count += 1
 
-                    # ИСПРАВЛЕНИЕ: Правильное отслеживание пользователей
+                    # Получаем ID сессии
                     me = await client.get_me()
                     session_id = f"{me.id}_{me.phone}"
 
+                    # Добавляем в текущий цикл
                     if session_id not in self.session_processed_users:
                         self.session_processed_users[session_id] = set()
-
-                    # Сохраняем как username так и другие возможные идентификаторы
                     self.session_processed_users[session_id].add(user)
 
-                    # Также устанавливаем атрибут на клиенте для обратной совместимости
-                    if not hasattr(client, 'processed_users'):
-                        client.processed_users = set()
-                    client.processed_users.add(user)
+                    # Добавляем в постоянное хранилище
+                    if session_id not in self.all_time_processed_users:
+                        self.all_time_processed_users[session_id] = []
+                    if user not in self.all_time_processed_users[session_id]:
+                        self.all_time_processed_users[session_id].append(user)
 
-                    if sent_count % 10 == 0:
+                    # Сохраняем после каждых 50 сообщений
+                    if sent_count % 50 == 0:
+                        self.save_processed_users_history()
                         print(f"📤 Отправлено {sent_count}/{len(users)} сообщений")
                 else:
                     failed_users.append(user)
@@ -653,11 +647,39 @@ class AutoMassSender:
 
             await asyncio.sleep(delay_ms / 1000)
 
+        # Сохраняем историю в конце
+        self.save_processed_users_history()
         if failed_users:
             await self.user_manager.save_users_async("data/failed_users.txt", failed_users)
             print(f"⚠️ {len(failed_users)} пользователей не получили сообщения")
 
         return sent_count
+
+    async def initialize_auto_responder(self):
+        """Инициализация автоответчика"""
+        print("🤖 Инициализация AI автоответчика...")
+
+        try:
+            self.auto_responder = init_auto_responder(self.config, self.session_manager)
+
+            if self.auto_responder and self.auto_responder.ai_enabled:
+                print("✅ AI автоответчик успешно инициализирован")
+
+                # Передаем карту номеров телефонов в автоответчик
+                if hasattr(self.auto_responder, 'session_phone_map'):
+                    self.auto_responder.session_phone_map = self.session_phone_map
+
+                stats = self.auto_responder.get_stats()
+                print("\n📋 Лог инициализации автоответчика:")
+                for log_entry in stats.get('initialization_log', []):
+                    print(f"   {log_entry}")
+            else:
+                print("❌ AI автоответчик не активен")
+
+        except Exception as e:
+            print(f"❌ Ошибка инициализации автоответчика: {e}")
+            import traceback
+            traceback.print_exc()
 
     async def try_send_message(self, client, user, message, max_retries=3):
         """Попытка отправки сообщения с обработкой ошибок"""
@@ -695,7 +717,7 @@ class AutoMassSender:
                             await alternative_session.send_message(user, message)
                             print(f"✅ [{me_alt.first_name}] -> {user}: отправлено через альтернативную сессию")
 
-                            # ИСПРАВЛЕНИЕ: Добавляем в отслеживание для альтернативной сессии
+                            # Добавляем в отслеживание для альтернативной сессии
                             session_id_alt = f"{me_alt.id}_{me_alt.phone}"
                             if session_id_alt not in self.session_processed_users:
                                 self.session_processed_users[session_id_alt] = set()
@@ -776,12 +798,8 @@ class AutoMassSender:
                 if hasattr(client, 'processed_users') and len(client.processed_users) > 0:
                     print(f"   📌 В атрибуте клиента: {len(client.processed_users)} пользователей")
 
-            except (MsgIdDecreaseRetryError, Exception) as e:
-                if isinstance(e, MsgIdDecreaseRetryError):
-                    print(f"⚠️ Внутренние проблемы Telegram при проверке")
-                    await asyncio.sleep(5)
-                else:
-                    print(f"❌ Ошибка настройки проверки: {e}")
+            except Exception as e:
+                print(f"❌ Ошибка настройки проверки: {e}")
 
     async def setup_message_listeners(self):
         """Настройка прослушки входящих сообщений"""
@@ -793,16 +811,15 @@ class AutoMassSender:
             try:
                 try:
                     me = await asyncio.wait_for(client.get_me(), timeout=5)
-                    if not me:
-                        raise Exception("Сессия не отвечает")
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    print(f"❌ Сессия {i + 1} не отвечает (timeout)")
+                    sessions_to_remove.append(client)
+                    continue
 
                     # Устанавливаем ID сессии для отслеживания
                     client._session_id = f"{me.id}_{me.phone}"
 
-                except (MsgIdDecreaseRetryError, Exception) as e:
-                    if isinstance(e, MsgIdDecreaseRetryError):
-                        print(f"⚠️ Внутренние проблемы Telegram для сессии, пропускаем прослушку")
-                        continue
+                except Exception as e:
                     print(f"❌ Сессия недоступна для прослушки: {e}")
                     sessions_to_remove.append(client)
                     continue
@@ -816,13 +833,12 @@ class AutoMassSender:
                             pass
                     client._message_handlers = []
 
-                # Создаем новый обработчик
                 @client.on(events.NewMessage(incoming=True))
                 async def handler(event, current_client=client):
                     try:
                         await self.handle_incoming_message(current_client, event)
-                    except (TypeNotFoundError, RPCError, MsgIdDecreaseRetryError) as e:
-                        if isinstance(e, MsgIdDecreaseRetryError):
+                    except (TypeNotFoundError, RPCError, MsgidDecreaseRetryError) as e:
+                        if isinstance(e, MsgidDecreaseRetryError):
                             print(f"⚠️ Внутренние проблемы Telegram в обработчике")
                             return
                         if self.is_known_error(e):
@@ -841,8 +857,8 @@ class AutoMassSender:
 
                 print(f"✅ {me.first_name}: прослушка активна")
 
-            except (TypeNotFoundError, RPCError, MsgIdDecreaseRetryError) as e:
-                if isinstance(e, MsgIdDecreaseRetryError):
+            except (TypeNotFoundError, RPCError, MsgidDecreaseRetryError) as e:
+                if isinstance(e, MsgidDecreaseRetryError):
                     print(f"⚠️ Внутренние проблемы Telegram, пропускаем сессию")
                 elif self.is_known_error(e):
                     print(f"⚠️ Известная ошибка сессии, помечаем для удаления")
@@ -859,22 +875,16 @@ class AutoMassSender:
                 self.active_sessions.remove(client)
 
     async def handle_incoming_message(self, client, event):
-        """ИСПРАВЛЕННАЯ обработка входящего сообщения"""
+        """Обработка входящего сообщения с использованием простого файла"""
         try:
             # Проверка работоспособности сессии
-            try:
-                me = await asyncio.wait_for(client.get_me(), timeout=3)
-                if not me:
-                    raise Exception("Сессия не отвечает")
-            except (MsgIdDecreaseRetryError, Exception) as e:
-                if isinstance(e, MsgIdDecreaseRetryError):
-                    print(f"⚠️ Внутренние проблемы Telegram при обработке сообщения")
-                    return
-                print(f"❌ Сессия умерла во время обработки сообщения: {e}")
-                await self.move_broken_session(client, "died_during_processing")
-                if client in self.active_sessions:
-                    self.active_sessions.remove(client)
-                return
+            if self.auto_responder:
+                try:
+                    me_info = await client.get_me()
+                    account_phone = me_info.phone if me_info else None
+                except Exception:
+                    account_phone = None
+                await self.process_auto_response(client, sender, text, account_phone)
 
             sender = await event.get_sender()
             if not sender:
@@ -893,7 +903,7 @@ class AutoMassSender:
                 sender_identifiers.append(sender.username)
             sender_identifiers.append(str(sender.id))
 
-            # ИСПРАВЛЕНИЕ: Проверяем в постоянной истории
+            # Проверяем в постоянной истории
             is_processed_user = False
 
             # Проверяем в истории всех времен
@@ -927,20 +937,23 @@ class AutoMassSender:
                 sender_info = {'name': sender.first_name or 'Unknown', 'username': sender.username or 'unknown'}
                 asyncio.create_task(notification_bot.send_notification(account_info, sender_info, text))
 
-            # Обрабатываем автоответ
+            # Обрабатываем автоответ с передачей номера телефона аккаунта
             if self.auto_responder:
                 await self.process_auto_response(client, sender, text)
-
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Удаляем сообщение У СЕССИИ, а не у пользователя
-            # Получаем диалог с пользователем
+                try:
+                    me_info = await client.get_me()
+                    account_phone = me_info.phone if me_info else None
+                except:
+                    account_phone = None
+                await self.process_auto_response(client, sender, text, account_phone)
+            # Удаляем сообщения
             try:
                 dialogs = await client.get_dialogs()
                 for dialog in dialogs:
                     if dialog.entity.id == sender.id:
-                        # Удаляем ВСЕ сообщения в диалоге с этим пользователем
                         async for message in client.iter_messages(dialog.entity, limit=None):
                             try:
-                                await message.delete()
+                                await message.delete(revoke=False)
                             except Exception as del_e:
                                 print(f"⚠️ Не удалось удалить сообщение: {del_e}")
                         print(f"   🗑️ Все сообщения в диалоге с {sender.first_name} удалены")
@@ -948,8 +961,8 @@ class AutoMassSender:
             except Exception as e:
                 print(f"   ⚠️ Ошибка при удалении сообщений: {e}")
 
-        except (TypeNotFoundError, RPCError, MsgIdDecreaseRetryError) as e:
-            if isinstance(e, MsgIdDecreaseRetryError):
+        except (TypeNotFoundError, RPCError, MsgidDecreaseRetryError) as e:
+            if isinstance(e, MsgidDecreaseRetryError):
                 print(f"⚠️ Внутренние проблемы Telegram")
                 return
             if self.is_known_error(e):
@@ -963,7 +976,7 @@ class AutoMassSender:
         except Exception as e:
             print(f"❌ Общая ошибка обработки сообщения: {e}")
 
-    async def process_auto_response(self, client, sender, message_text):
+    async def process_auto_response(self, client, sender, message_text, account_phone=None):
         """Обработка автоответа"""
         try:
             if not self.auto_responder:
@@ -973,12 +986,20 @@ class AutoMassSender:
             if sender.username:
                 user_id = f"@{sender.username}"
 
+            # Получаем информацию об аккаунте, если не передана
+            if account_phone is None:
+                try:
+                    me_info = await client.get_me()
+                    account_phone = me_info.phone if me_info else None
+                except:
+                    account_phone = None
+
             response = await self.auto_responder.handle_message(
                 user_id=user_id,
                 message=message_text,
                 phone=sender.phone if hasattr(sender, 'phone') else None,
                 username=sender.username,
-                first_name=sender.first_name
+                first_name=sender.first_name,
             )
 
             if response:
@@ -1015,7 +1036,6 @@ class AutoMassSender:
 
                 # Показываем статистику истории
                 total_in_history = sum(len(users) for users in self.all_time_processed_users.values())
-                print(f"📚 В истории отслеживания: {total_in_history} связей пользователь-сессия")
 
                 await self.check_sessions_health()
 
@@ -1200,6 +1220,7 @@ async def main():
                 print(f"❌ Ошибка очистки сессии: {e}")
 
         print("✅ Очистка всех диалогов завершена")
+
 
 if __name__ == "__main__":
     try:

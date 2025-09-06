@@ -91,7 +91,7 @@ notification_bot = None
 def init_notification_bot(bot_token=None, group_chat_id=None):
     global notification_bot
     BOT_TOKEN = bot_token or "токен"
-    GROUP_CHAT_ID = group_chat_id or "-1003073517667"
+    GROUP_CHAT_ID = group_chat_id or "-1003073517667" and "-1003019297373"
     notification_bot = NotificationBot(BOT_TOKEN, GROUP_CHAT_ID)
     print("🤖 Notification Bot инициализирован")
     return notification_bot
